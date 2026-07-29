@@ -16,6 +16,8 @@
 #include <WiFi.h>
 #include <WiFiClientSecure.h>
 #include <WiFiUdp.h>
+#include <time.h>
+#include <sntp.h>
 
 // ---- remote management defaults ----
 #define FW_VERSION 100
@@ -1084,6 +1086,11 @@ static void startMainServices() {
     MDNS.addService("http", "tcp", 80);
     Serial.println("dashboard: http://c3adblock.local");
   }
+  
+  // Setup NTP for Kyiv Time
+  sntp_servermode_dhcp(1); // Optional: use DHCP provided NTP if available
+  configTzTime("EET-2EEST,M3.5.0/3,M10.5.0/4", "pool.ntp.org", "time.nist.gov");
+  
   dnsServer.begin(DNS_PORT);
   upstreamCli.begin(0);
 
@@ -1261,12 +1268,20 @@ void loop() {
     digitalWrite(LED_PIN, LOW);
   }
 
-  if (updateUrl.length()) {
-    uint32_t now = millis();
-    if (lastCheckMs == 0)
-      lastCheckMs = now;
-    else if (now - lastCheckMs >= updateIntervalH * 3600000UL) {
-      lastCheckMs = now;
+  time_t nowTime;
+  time(&nowTime);
+  struct tm timeinfo;
+  bool timeValid = false;
+  if (localtime_r(&nowTime, &timeinfo)) {
+    if (timeinfo.tm_year > 120) { // Time is set (year > 2020)
+      timeValid = true;
+    }
+  }
+
+  if (updateUrl.length() && timeValid) {
+    static int lastUpdateDay = -1;
+    if (timeinfo.tm_hour == 4 && timeinfo.tm_min == 0 && lastUpdateDay != timeinfo.tm_yday) {
+      lastUpdateDay = timeinfo.tm_yday;
       fetchBlocklist(updateUrl);
     }
   }
@@ -1371,11 +1386,10 @@ void loop() {
     }
   }
 
-  if (fwUpdateUrl.length()) {
-    uint32_t now = millis();
-    if (lastFwCheckMs == 0 ||
-        now - lastFwCheckMs >= 86400000UL) { // daily check
-      lastFwCheckMs = now;
+  if (fwUpdateUrl.length() && timeValid) {
+    static int lastFwUpdateDay = -1;
+    if (timeinfo.tm_hour == 4 && timeinfo.tm_min == 10 && lastFwUpdateDay != timeinfo.tm_yday) {
+      lastFwUpdateDay = timeinfo.tm_yday;
       checkFirmwareUpdate();
     }
   }
