@@ -21,7 +21,7 @@
 #include <Preferences.h>
 
 // ---- remote management defaults ----
-#define FW_VERSION 106
+#define FW_VERSION 107
 #define DEFAULT_FIREBASE_URL                                                   \
   "https://esp-adblock-default-rtdb.europe-west1.firebasedatabase.app/"
 #define FIREBASE_SECRET "gXBgqzEGZEvLC1ARnoMKxCHpEQoPVAx5cPXg9PUy"
