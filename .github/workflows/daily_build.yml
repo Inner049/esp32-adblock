@@ -40,7 +40,7 @@ jobs:
       - name: Prepare Dashboard and OTA
         run: |
           cp -r dashboard/* public/ || true
-          if [ -d "ota" ]; then cp -r ota/* public/ ; fi
+          if [ -d "ota" ]; then cp -r ota public/ ; fi
 
       - name: Setup Pages
         uses: actions/configure-pages@v5
