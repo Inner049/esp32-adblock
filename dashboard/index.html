@@ -1,0 +1,148 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ESP32 AdBlock Fleet</title>
+    <style>
+        body { font-family: system-ui, sans-serif; background: #0d1117; color: #c9d1d9; margin: 0; padding: 20px; }
+        .container { max-width: 1000px; margin: auto; }
+        h1 { color: #3fb950; }
+        table { width: 100%; border-collapse: collapse; background: #161b22; border-radius: 8px; overflow: hidden; margin-top: 20px; }
+        th, td { padding: 12px; text-align: left; border-bottom: 1px solid #21262d; }
+        th { background: #21262d; color: #8b949e; }
+        .online { color: #3fb950; font-weight: bold; }
+        .offline { color: #f85149; font-weight: bold; }
+        .card { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 16px; margin-bottom: 20px; }
+        input[type="text"] { background: #0d1117; border: 1px solid #30363d; color: #c9d1d9; padding: 8px; border-radius: 4px; width: 400px; }
+        button { background: #238636; color: white; border: none; padding: 8px 16px; border-radius: 4px; cursor: pointer; }
+        button:hover { background: #2ea043; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🛡️ AdBlock Fleet Dashboard</h1>
+        
+        <div class="card" id="setup">
+            <h3 style="margin-top:0">Firebase Setup</h3>
+            <p style="color: #8b949e; font-size: 14px; margin-top:0;">Enter your Firebase Realtime Database URL to monitor devices. (e.g. https://your-project.firebaseio.com)</p>
+            <input type="text" id="fbUrl" placeholder="https://your-project-default-rtdb.europe-west1.firebasedatabase.app">
+            <button onclick="saveAndLoad()">Save & Load</button>
+        </div>
+
+        <table>
+            <thead>
+                <tr>
+                    <th>Device MAC</th>
+                    <th>Status</th>
+                    <th>Local IP</th>
+                    <th>Uptime</th>
+                    <th>Blocked Ads</th>
+                    <th>Allowed Req</th>
+                    <th>Free RAM</th>
+                    <th>Last Seen</th>
+                    <th>Actions</th>
+                </tr>
+            </thead>
+            <tbody id="devicesTable">
+                <tr><td colspan="8" style="text-align: center; color: #8b949e;">No database URL provided</td></tr>
+            </tbody>
+        </table>
+    </div>
+
+    <script>
+        const STORE_KEY = 'fb_url';
+        const urlInput = document.getElementById('fbUrl');
+        
+        if (localStorage.getItem(STORE_KEY)) {
+            urlInput.value = localStorage.getItem(STORE_KEY);
+            fetchDevices();
+        }
+
+        function saveAndLoad() {
+            let url = urlInput.value.trim();
+            if (!url) return;
+            if (!url.endsWith('/')) url += '/';
+            localStorage.setItem(STORE_KEY, url);
+            fetchDevices();
+        }
+
+        function formatUptime(seconds) {
+            const d = Math.floor(seconds / (3600*24));
+            const h = Math.floor(seconds % (3600*24) / 3600);
+            const m = Math.floor(seconds % 3600 / 60);
+            if (d > 0) return `${d}d ${h}h`;
+            return `${h}h ${m}m`;
+        }
+
+        function fetchDevices() {
+            let url = localStorage.getItem(STORE_KEY);
+            if (!url) return;
+            if (!url.endsWith('/')) url += '/';
+            
+            fetch(url + 'devices.json')
+                .then(res => res.json())
+                .then(data => {
+                    const tbody = document.getElementById('devicesTable');
+                    tbody.innerHTML = '';
+                    
+                    if (!data) {
+                        tbody.innerHTML = '<tr><td colspan="8" style="text-align: center; color: #8b949e;">No devices found</td></tr>';
+                        return;
+                    }
+
+                    // Firebase gives timestamp in ms, so Date.now() is fine. 
+                    // Let's ensure time formats match! Our ESP32 code uses: ".sv": "timestamp"
+                    // which returns milliseconds since epoch.
+                    const now = Date.now();
+                    
+                    for (const [mac, dev] of Object.entries(data)) {
+                        const lastSeen = dev.lastSeen || 0; 
+                        const isOnline = (now - lastSeen) < 600000; // 10 minutes timeout
+                        
+                        const tr = document.createElement('tr');
+                        tr.innerHTML = `
+                            <td style="font-family: monospace;">${mac}</td>
+                            <td class="${isOnline ? 'online' : 'offline'}">${isOnline ? 'Online' : 'Offline'}</td>
+                            <td>${dev.ip || '-'}</td>
+                            <td>${formatUptime(dev.uptime || 0)}</td>
+                            <td style="color:#f85149">${(dev.blocked || 0).toLocaleString()}</td>
+                            <td style="color:#3fb950">${(dev.allowed || 0).toLocaleString()}</td>
+                            <td>${Math.round((dev.heap || 0)/1024)} KB</td>
+                            <td style="font-size: 12px; color: #8b949e">${new Date(lastSeen).toLocaleString()}</td>
+                            <td>
+                                <button onclick="sendCommand('${mac}', 'reboot')" style="font-size: 11px; padding: 4px 8px; margin-right: 4px; background: #da3633">Reboot</button>
+                                <button onclick="sendCommand('${mac}', 'update_fw')" style="font-size: 11px; padding: 4px 8px; background: #1f6feb">Update FW</button>
+                            </td>
+                        `;
+                        tbody.appendChild(tr);
+                    }
+                })
+                .catch(err => {
+                    console.error(err);
+                    document.getElementById('devicesTable').innerHTML = `<tr><td colspan="9" style="color: #f85149;">Error loading data. Make sure URL is correct and Database rules allow public Read.</td></tr>`;
+                });
+        }
+
+        function sendCommand(mac, cmd) {
+            if (!confirm(`Are you sure you want to send '${cmd}' to device ${mac}?`)) return;
+            let url = localStorage.getItem(STORE_KEY);
+            if (!url) return;
+            if (!url.endsWith('/')) url += '/';
+            
+            fetch(`${url}devices/${mac}/command.json`, {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(cmd)
+            })
+            .then(res => {
+                if (res.ok) alert('Command sent successfully!');
+                else alert('Failed to send command');
+            })
+            .catch(err => alert('Error: ' + err));
+        }
+
+        setInterval(fetchDevices, 30000);
+    </script>
+</body>
+</html>
