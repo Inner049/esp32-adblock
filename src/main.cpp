@@ -11,21 +11,22 @@
 #include <HTTPClient.h>
 #include <HTTPUpdate.h>
 #include <LittleFS.h>
+#include <Preferences.h>
 #include <Update.h>
 #include <WebServer.h>
 #include <WiFi.h>
 #include <WiFiClientSecure.h>
 #include <WiFiUdp.h>
-#include <time.h>
 #include <sntp.h>
-#include <Preferences.h>
+#include <time.h>
 
 // ---- remote management defaults ----
-#define FW_VERSION 107
+#define FW_VERSION 109
 #define DEFAULT_FIREBASE_URL                                                   \
   "https://esp-adblock-default-rtdb.europe-west1.firebasedatabase.app/"
 #define FIREBASE_SECRET "gXBgqzEGZEvLC1ARnoMKxCHpEQoPVAx5cPXg9PUy"
-#define DEFAULT_BLOCKLIST_URL "https://Inner049.github.io/esp32-adblock/blocklist.bin"
+#define DEFAULT_BLOCKLIST_URL                                                  \
+  "https://Inner049.github.io/esp32-adblock/blocklist.bin"
 #define DEFAULT_FW_UPDATE_URL "https://Inner049.github.io/esp32-adblock/ota/"
 
 // ---- hardware ----
@@ -55,6 +56,7 @@ bool pendingFwTsSave = false;
 uint8_t buf[600];
 
 IPAddress upstreamDNS(9, 9, 9, 9); // configurable, saved in /dns.cfg
+uint32_t dnsTimeoutMs = 700;       // configurable, saved in /dns.cfg
 String currentLang = "en";         // uk | ru | en, saved in /lang.cfg
 String cfgSSID, cfgPass;           // loaded from /wifi.cfg
 
@@ -100,7 +102,8 @@ String extIP = "";
 String actionStatus = "Booted";
 
 static void fetchExternalIP() {
-  if (WiFi.status() != WL_CONNECTED) return;
+  if (WiFi.status() != WL_CONNECTED)
+    return;
   HTTPClient http;
   http.setTimeout(3000);
   if (http.begin("http://api.ipify.org")) {
@@ -114,7 +117,8 @@ static void fetchExternalIP() {
 }
 
 static void pushTelemetry() {
-  if (firebaseDbUrl.length() == 0) return;
+  if (firebaseDbUrl.length() == 0)
+    return;
   String url = firebaseDbUrl;
   if (!url.endsWith("/"))
     url += "/";
@@ -128,17 +132,16 @@ static void pushTelemetry() {
     fetchExternalIP();
   }
 
-  String payload = "{\"ip\":\"" + WiFi.localIP().toString() +
-                   "\",\"ext_ip\":\"" + extIP +
-                   "\",\"uptime\":" + String(millis() / 1000) +
-                   ",\"blocked\":" + String(totalBlocked) +
-                   ",\"allowed\":" + String(totalAllowed) +
-                   ",\"heap\":" + String(ESP.getFreeHeap()) +
-                   ",\"fw_version\":\"" + String(FW_VERSION) + "\"," +
-                   "\"last_fw_ts\":" + String(last_fw_ts) + "," +
-                   "\"last_list_ts\":" + String(last_list_ts) + "," +
-                   "\"status_msg\":\"" + actionStatus + "\"" +
-                   ",\"lastSeen\": { \".sv\": \"timestamp\" }}";
+  String payload =
+      "{\"ip\":\"" + WiFi.localIP().toString() + "\",\"ext_ip\":\"" + extIP +
+      "\",\"uptime\":" + String(millis() / 1000) +
+      ",\"blocked\":" + String(totalBlocked) +
+      ",\"allowed\":" + String(totalAllowed) +
+      ",\"heap\":" + String(ESP.getFreeHeap()) + ",\"fw_version\":\"" +
+      String(FW_VERSION) + "\"," + "\"last_fw_ts\":" + String(last_fw_ts) +
+      "," + "\"last_list_ts\":" + String(last_list_ts) + "," +
+      "\"status_msg\":\"" + actionStatus + "\"" +
+      ",\"lastSeen\": { \".sv\": \"timestamp\" }}";
 
   WiFiClientSecure client;
   client.setInsecure();
@@ -322,12 +325,18 @@ static void loadDnsCfg() {
   File f = LittleFS.open("/dns.cfg", "r");
   if (!f)
     return;
-  String line = f.readStringUntil('\n');
-  line.trim();
-  if (line.startsWith("upstream=")) {
-    String ip = line.substring(9);
-    ip.trim();
-    upstreamDNS.fromString(ip);
+  while (f.available()) {
+    String line = f.readStringUntil('\n');
+    line.trim();
+    if (line.startsWith("upstream=")) {
+      String ip = line.substring(9);
+      ip.trim();
+      upstreamDNS.fromString(ip);
+    } else if (line.startsWith("timeout=")) {
+      uint32_t t = line.substring(8).toInt();
+      if (t >= 50 && t <= 5000)
+        dnsTimeoutMs = t;
+    }
   }
   f.close();
 }
@@ -336,6 +345,7 @@ static void saveDnsCfg() {
   if (!f)
     return;
   f.println("upstream=" + upstreamDNS.toString());
+  f.println("timeout=" + String(dnsTimeoutMs));
   f.close();
 }
 static void loadLangCfg() {
@@ -477,7 +487,7 @@ static int forwardUpstream(int qlen) {
   upstreamCli.write(buf, qlen);
   upstreamCli.endPacket();
   uint32_t t0 = millis();
-  while (millis() - t0 < 1000) {
+  while (millis() - t0 < dnsTimeoutMs) {
     int sz = upstreamCli.parsePacket();
     if (sz > 0)
       return upstreamCli.read(buf, sizeof(buf));
@@ -683,6 +693,7 @@ h2{font-size:14px;color:#8b949e;margin:18px 0 8px}
 <h2 id=hDns></h2>
 <div style=margin-bottom:6px>
 <select id=dsel><option value="9.9.9.9">Quad9 (9.9.9.9)</option><option value="1.1.1.1">Cloudflare (1.1.1.1)</option><option value="8.8.8.8">Google (8.8.8.8)</option><option value="208.67.222.222">OpenDNS (208.67.222.222)</option></select>
+<span id=tL style="color:#8b949e;font-size:12px;margin-left:8px"></span> <input id=dtout size=4 value=700> <span style="color:#8b949e;font-size:12px">ms</span>
 <button onclick=setDns() id=bDn></button> <button onclick=bench() id=bBe></button> <button onclick=benchAll() id=bBA></button></div>
 <div class=bnc id=bres></div>
 <h2 id=hRst></h2>
@@ -701,7 +712,7 @@ hFw:'ПРОШИВКА — OTA',bFl:'Прошити',fwH:'завантажте fi
 hDns:'НАЛАШТУВАННЯ DNS',bDn:'Змінити',bBe:'Тест',bBA:'Тест всіх',
 hRst:'СКИДАННЯ',bRs:'Скинути налаштування',rstW:'WiFi та DNS будуть видалені. Пристрій перезавантажиться.',
 rstC:'Скинути всі налаштування?',
-fl:'прошивка',ul:'завантаження',rb:'✓ перезавантаження ~15с',uf:'✗ помилка',tst:'тестування...',dom:'доменів'
+fl:'прошивка',ul:'завантаження',rb:'✓ перезавантаження ~15с',uf:'✗ помилка',tst:'тестування...',dom:'доменів',tL:'Таймаут'
 },
 ru:{
 sB:'Заблокировано',sA:'Разрешено',sL:'Блоклист',sC:'Клиенты',sW:'WiFi',sT:'Темп',sR:'Свободная RAM',sU:'Аптайм',
@@ -714,7 +725,7 @@ hFw:'ПРОШИВКА — OTA',bFl:'Прошить',fwH:'загрузите firm
 hDns:'НАСТРОЙКИ DNS',bDn:'Сменить',bBe:'Тест',bBA:'Тест всех',
 hRst:'СБРОС',bRs:'Сбросить настройки',rstW:'WiFi и DNS будут удалены. Устройство перезагрузится.',
 rstC:'Сбросить все настройки?',
-fl:'прошивка',ul:'загрузка',rb:'✓ перезагрузка ~15с',uf:'✗ ошибка',tst:'тестирование...',dom:'доменов'
+fl:'прошивка',ul:'загрузка',rb:'✓ перезагрузка ~15с',uf:'✗ ошибка',tst:'тестирование...',dom:'доменов',tL:'Таймаут'
 },
 en:{
 sB:'Total blocked',sA:'Total allowed',sL:'Blocklist',sC:'Clients',sW:'WiFi',sT:'Temp',sR:'Free RAM',sU:'Uptime',
@@ -727,14 +738,14 @@ hFw:'FIRMWARE — OTA UPDATE',bFl:'Flash firmware',fwH:'upload firmware.bin — 
 hDns:'DNS SETTINGS',bDn:'Change',bBe:'Benchmark',bBA:'Bench all',
 hRst:'FACTORY RESET',bRs:'Reset settings',rstW:'WiFi and DNS settings will be deleted. Device will reboot.',
 rstC:'Reset all settings?',
-fl:'flashing',ul:'uploading',rb:'✓ rebooting ~15s',uf:'✗ failed',tst:'testing...',dom:'domains'
+fl:'flashing',ul:'uploading',rb:'✓ rebooting ~15s',uf:'✗ failed',tst:'testing...',dom:'domains',tL:'Timeout'
 }};
 let lang='en';
 function t(k){return L[lang]&&L[lang][k]||L.en[k]||k}
 function fmt(n){return n.toLocaleString()}
 function tr(){['hCli','thCli','thBlk','thAlw','hCust','bBlk','hUp','bUp','hRem','bSv','bFn','hFw','bFl','hDns','bDn','bBe','bBA','hRst','bRs'].forEach(k=>{
 let e=document.getElementById(k);if(e)e.textContent=t(k)});
-['upH','fwH','rstW','remH','evL','hL'].forEach(k=>{let e=document.getElementById(k);if(e)e.textContent=t(k)});
+['upH','fwH','rstW','remH','evL','hL','tL'].forEach(k=>{let e=document.getElementById(k);if(e)e.textContent=t(k)});
 document.querySelectorAll('.lb').forEach((b,i)=>{b.classList.toggle('on',['uk','ru','en'][i]==lang)})}
 async function load(){let s=await(await fetch('/stats.json')).json();
 if(s.lang){lang=s.lang;tr()}
@@ -750,6 +761,7 @@ if(document.activeElement!=uurl)uurl.value=s.upurl||'';
 if(document.activeElement!=uiv)uiv.value=s.upiv||24;
 ustat.textContent=s.upstat||'—';
 if(document.activeElement!=furl)furl.value=s.furl||'';
+if(document.activeElement!=dtout)dtout.value=s.dnstout||700;
 if(s.dns){let f=false;for(let o of dsel.options)if(o.value==s.dns){f=true;break}
 if(!f){let o=new Option('Custom ('+s.dns+')',s.dns);dsel.prepend(o)}
 dsel.value=s.dns}}
@@ -758,7 +770,7 @@ function saveUpd(){fetch('/setupdate?u='+encodeURIComponent(uurl.value.trim())+'
 function fetchNow(){ustat.textContent='...';fetch('/fetchnow').then(r=>r.text()).then(v=>{ustat.textContent=v;load()})}
 function saveCld(){fetch('/setcloud?u='+encodeURIComponent(furl.value.trim())).then(load)}
 function sL(l){fetch('/setlang?l='+l).then(()=>{lang=l;tr();load()})}
-function setDns(){fetch('/setdns?ip='+dsel.value).then(load)}
+function setDns(){fetch('/setdns?ip='+dsel.value+'&timeout='+(parseInt(dtout.value)||700)).then(load)}
 function bench(){bres.textContent=t('tst');fetch('/benchmark?ip='+dsel.value).then(r=>r.json()).then(d=>{bres.textContent=dsel.value+': min='+d.min+'ms avg='+d.avg+'ms max='+d.max+'ms'}).catch(()=>{bres.textContent='error'})}
 function benchAll(){bres.textContent=t('tst');fetch('/benchmarkall').then(r=>r.json()).then(d=>{bres.innerHTML=Object.entries(d).map(([k,v])=>k+': min='+v.min+'ms avg='+v.avg+'ms max='+v.max+'ms').join('<br>')}).catch(()=>{bres.textContent='error'})}
 fwf.onsubmit=async e=>{e.preventDefault();let f=fwb.files[0];if(!f)return;fwmsg.textContent=t('fl')+' '+(f.size/1048576).toFixed(2)+' MB...';
@@ -779,31 +791,43 @@ static void handleStats() {
   char ut[24];
   snprintf(ut, sizeof(ut), "%lud %luh %lum", up / 86400, (up % 86400) / 3600,
            (up % 3600) / 60);
+
+  web.setContentLength(CONTENT_LENGTH_UNKNOWN);
+  web.send(200, "application/json", "");
+
   String j = "{\"ip\":\"" + WiFi.localIP().toString() +
              "\",\"blocked\":" + totalBlocked + ",\"allowed\":" + totalAllowed +
              ",\"domains\":" + numHashes + ",\"rssi\":" + WiFi.RSSI() +
              ",\"temp\":" + String(temperatureRead(), 1) +
              ",\"heap\":" + ESP.getFreeHeap() + ",\"uptime\":\"" + ut + "\"" +
              ",\"lang\":\"" + currentLang + "\"" + ",\"dns\":\"" +
-             upstreamDNS.toString() + "\"" + ",\"upurl\":\"" + jesc(updateUrl) +
-             "\",\"upiv\":" + updateIntervalH + ",\"upstat\":\"" +
-             jesc(updateStatus) + "\"" + ",\"furl\":\"" + jesc(firebaseDbUrl) +
-             "\"" + ",\"clients\":[";
+             upstreamDNS.toString() + "\"" +
+             ",\"dnstout\":" + String(dnsTimeoutMs) + ",\"upurl\":\"" +
+             jesc(updateUrl) + "\",\"upiv\":" + updateIntervalH +
+             ",\"upstat\":\"" + jesc(updateStatus) + "\"" + ",\"furl\":\"" +
+             jesc(firebaseDbUrl) + "\"" + ",\"clients\":[";
+  web.sendContent(j);
+
   for (int i = 0; i < numClients; i++) {
     Dev &c = clients[i];
     IPAddress ip(c.ip);
-    j += (i ? "," : "");
+    j = (i ? "," : "");
     j += "{\"ip\":\"" + ip.toString() + "\",\"mac\":\"" + macStr(c.mac) +
          "\",\"blocked\":" + c.blocked + ",\"allowed\":" + c.allowed +
          ",\"banned\":" + (c.banned ? "true" : "false") + "}";
+    web.sendContent(j);
   }
-  j += "],\"custom\":[";
+
+  web.sendContent("],\"custom\":[");
+
   for (int i = 0; i < numCustom; i++) {
-    j += (i ? "," : "");
+    j = (i ? "," : "");
     j += "\"" + jesc(customDom[i]) + "\"";
+    web.sendContent(j);
   }
-  j += "]}";
-  web.send(200, "application/json", j);
+
+  web.sendContent("]}");
+  web.sendContent("");
 }
 static void handleBan() {
   IPAddress ip;
@@ -860,11 +884,18 @@ static void handleSaveWifi() {
   ESP.restart();
 }
 static void handleSetDns() {
-  IPAddress dns;
-  if (dns.fromString(web.arg("ip"))) {
-    upstreamDNS = dns;
-    saveDnsCfg();
+  if (web.hasArg("ip")) {
+    IPAddress dns;
+    if (dns.fromString(web.arg("ip"))) {
+      upstreamDNS = dns;
+    }
   }
+  if (web.hasArg("timeout")) {
+    uint32_t t = web.arg("timeout").toInt();
+    if (t >= 50 && t <= 5000)
+      dnsTimeoutMs = t;
+  }
+  saveDnsCfg();
   web.send(200, "text/plain", "ok");
 }
 static void handleFactoryReset() {
@@ -1156,11 +1187,11 @@ static void startMainServices() {
     MDNS.addService("http", "tcp", 80);
     Serial.println("dashboard: http://c3adblock.local");
   }
-  
+
   // Setup NTP for Kyiv Time
   sntp_servermode_dhcp(1); // Optional: use DHCP provided NTP if available
   configTzTime("EET-2EEST,M3.5.0/3,M10.5.0/4", "pool.ntp.org", "time.nist.gov");
-  
+
   dnsServer.begin(DNS_PORT);
   upstreamCli.begin(0);
 
@@ -1212,8 +1243,10 @@ static void startMainServices() {
 
 static void startSetupMode() {
   WiFi.mode(WIFI_AP);
-  WiFi.setSleep(false); // ОЧЕНЬ ВАЖНО для одноядерного ESP32-C3 (иначе тормозит DHCP)
-  WiFi.softAPConfig(IPAddress(192, 168, 4, 1), IPAddress(192, 168, 4, 1), IPAddress(255, 255, 255, 0));
+  WiFi.setSleep(
+      false); // ОЧЕНЬ ВАЖНО для одноядерного ESP32-C3 (иначе тормозит DHCP)
+  WiFi.softAPConfig(IPAddress(192, 168, 4, 1), IPAddress(192, 168, 4, 1),
+                    IPAddress(255, 255, 255, 0));
   WiFi.softAP("AdBlock-Setup", NULL, 6); // Явно указываем 6-й канал
   Serial.printf("AP: AdBlock-Setup @ %s\n", WiFi.softAPIP().toString().c_str());
   digitalWrite(LED_PIN, LOW);
@@ -1222,7 +1255,10 @@ static void startSetupMode() {
   web.on("/scan.json", handleScanJson);
   web.on("/save", handleSaveWifi);
   web.on("/setlang", handleSetLang);
-  web.onNotFound([]() { web.send_P(200, "text/html", SETUP_PAGE); });
+  web.onNotFound([]() {
+    web.sendHeader("Location", "http://192.168.4.1/", true);
+    web.send(302, "text/plain", "");
+  });
   web.begin();
   Serial.println("Setup mode: DNS redirect + web :80");
 }
@@ -1363,11 +1399,38 @@ void loop() {
     pendingFwTsSave = false;
   }
 
-  if (updateUrl.length() && timeValid) {
-    static int lastUpdateDay = -1;
-    if (timeinfo.tm_hour == 4 && timeinfo.tm_min == 0 && lastUpdateDay != timeinfo.tm_yday) {
-      lastUpdateDay = timeinfo.tm_yday;
-      if (fetchBlocklist(updateUrl)) {
+  if (updateUrl.length() && WiFi.status() == WL_CONNECTED) {
+    bool shouldUpdate = false;
+
+    if (numHashes == 0) {
+      // Если список отсутствует (например, сбой при прошлом обновлении),
+      // пытаемся загрузить его. Чтобы не "заспамить" GitHub Pages частыми
+      // запросами и не получить бан, делаем попытки не чаще чем раз в 5 минут
+      // (300 000 мс).
+      static uint32_t lastRetry = 0;
+      if (millis() - lastRetry > 300000) {
+        lastRetry = millis();
+        shouldUpdate = true;
+      }
+    } else if (timeValid) {
+      // Плановое обновление
+      // Пытаемся сохранить обновление в 4 утра, либо если прошло больше
+      // времени, чем updateIntervalH
+      static int lastUpdateDay = -1;
+      if (timeinfo.tm_hour == 4 && timeinfo.tm_min == 0 &&
+          lastUpdateDay != timeinfo.tm_yday) {
+        lastUpdateDay = timeinfo.tm_yday;
+        shouldUpdate = true;
+      } else if (last_list_ts > 0 && (uint32_t)nowTime > last_list_ts &&
+                 ((uint32_t)nowTime - last_list_ts) >=
+                     (updateIntervalH * 3600)) {
+        // Если интервал задан в UI и это время истекло
+        shouldUpdate = true;
+      }
+    }
+
+    if (shouldUpdate) {
+      if (fetchBlocklist(updateUrl) && timeValid) {
         prefs.putUInt("last_list_ts", (uint32_t)nowTime);
         last_list_ts = (uint32_t)nowTime;
       }
@@ -1381,12 +1444,13 @@ void loop() {
       lastTelemetryMs = now;
       pushTelemetry();
     }
-    
-    if (lastCmdCheckMs == 0 || now - lastCmdCheckMs >= 60000UL) { // every 60 seconds
+
+    if (lastCmdCheckMs == 0 ||
+        now - lastCmdCheckMs >= 60000UL) { // every 60 seconds
       lastCmdCheckMs = now;
       String mac = WiFi.macAddress();
       mac.replace(":", "");
-      
+
       WiFiClientSecure client;
       client.setInsecure();
       HTTPClient http;
@@ -1408,9 +1472,13 @@ void loop() {
       if (code == HTTP_CODE_OK) {
         String cmd = http.getString();
         cmd.replace("\"", ""); // remove quotes
-        if (cmd == "reboot" || cmd == "update_fw" || cmd == "ping" || cmd == "update_blocklist") {
+        if (cmd == "reboot" || cmd == "update_fw" || cmd == "ping" ||
+            cmd == "update_blocklist") {
           // Clear command in Firebase FIRST
-          if (firebaseDbUrl.startsWith("https")) http.begin(client, cmdUrl); else http.begin(cmdUrl);
+          if (firebaseDbUrl.startsWith("https"))
+            http.begin(client, cmdUrl);
+          else
+            http.begin(cmdUrl);
           http.addHeader("Content-Type", "application/json");
           http.PUT("null");
           http.end();
