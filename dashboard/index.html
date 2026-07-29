@@ -24,10 +24,10 @@
         <h1>🛡️ AdBlock Fleet Dashboard</h1>
         
         <div class="card" id="setup">
-            <h3 style="margin-top:0">Firebase Setup</h3>
-            <p style="color: #8b949e; font-size: 14px; margin-top:0;">Enter your Firebase Realtime Database URL to monitor devices. (e.g. https://your-project.firebaseio.com)</p>
-            <input type="text" id="fbUrl" placeholder="https://your-project-default-rtdb.europe-west1.firebasedatabase.app">
-            <button onclick="saveAndLoad()">Save & Load</button>
+            <h3 style="margin-top:0">Dashboard Login</h3>
+            <p style="color: #8b949e; font-size: 14px; margin-top:0;">Enter your Firebase Database Secret to view devices.</p>
+            <input type="password" id="fbAuth" placeholder="Firebase Auth Secret">
+            <button onclick="saveAndLoad()">Login</button>
         </div>
 
         <table>
@@ -51,19 +51,19 @@
     </div>
 
     <script>
-        const STORE_KEY = 'fb_url';
-        const urlInput = document.getElementById('fbUrl');
+        const FIREBASE_URL = 'https://esp-adblock-default-rtdb.europe-west1.firebasedatabase.app/';
+        const STORE_KEY = 'fb_auth_secret';
+        const authInput = document.getElementById('fbAuth');
         
         if (localStorage.getItem(STORE_KEY)) {
-            urlInput.value = localStorage.getItem(STORE_KEY);
+            authInput.value = localStorage.getItem(STORE_KEY);
             fetchDevices();
         }
 
         function saveAndLoad() {
-            let url = urlInput.value.trim();
-            if (!url) return;
-            if (!url.endsWith('/')) url += '/';
-            localStorage.setItem(STORE_KEY, url);
+            let secret = authInput.value.trim();
+            if (!secret) return;
+            localStorage.setItem(STORE_KEY, secret);
             fetchDevices();
         }
 
@@ -76,12 +76,14 @@
         }
 
         function fetchDevices() {
-            let url = localStorage.getItem(STORE_KEY);
-            if (!url) return;
-            if (!url.endsWith('/')) url += '/';
+            let secret = localStorage.getItem(STORE_KEY);
+            if (!secret) return;
             
-            fetch(url + 'devices.json')
-                .then(res => res.json())
+            fetch(`${FIREBASE_URL}devices.json?auth=${secret}`)
+                .then(res => {
+                    if (res.status === 401 || res.status === 403) throw new Error("Invalid password (Auth Secret). Access Denied.");
+                    return res.json();
+                })
                 .then(data => {
                     const tbody = document.getElementById('devicesTable');
                     tbody.innerHTML = '';
@@ -120,17 +122,16 @@
                 })
                 .catch(err => {
                     console.error(err);
-                    document.getElementById('devicesTable').innerHTML = `<tr><td colspan="9" style="color: #f85149;">Error loading data. Make sure URL is correct and Database rules allow public Read.</td></tr>`;
+                    document.getElementById('devicesTable').innerHTML = `<tr><td colspan="9" style="color: #f85149;">Error loading data: ${err.message}</td></tr>`;
                 });
         }
 
         function sendCommand(mac, cmd) {
             if (!confirm(`Are you sure you want to send '${cmd}' to device ${mac}?`)) return;
-            let url = localStorage.getItem(STORE_KEY);
-            if (!url) return;
-            if (!url.endsWith('/')) url += '/';
+            let secret = localStorage.getItem(STORE_KEY);
+            if (!secret) return;
             
-            fetch(`${url}devices/${mac}/command.json`, {
+            fetch(`${FIREBASE_URL}devices/${mac}/command.json?auth=${secret}`, {
                 method: 'PUT',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(cmd)

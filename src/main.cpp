@@ -20,6 +20,7 @@
 // ---- remote management defaults ----
 #define FW_VERSION 100
 #define DEFAULT_FIREBASE_URL "https://esp-adblock-default-rtdb.europe-west1.firebasedatabase.app/"
+#define FIREBASE_SECRET "YOUR_SECRET_HERE"
 #define DEFAULT_FW_UPDATE_URL "https://Inner049.github.io/esp32-adblock/"
 
 // ---- hardware ----
@@ -793,6 +794,7 @@ void loop() {
       String mac = WiFi.macAddress();
       mac.replace(":", "");
       url += "devices/" + mac + ".json";
+      if (String(FIREBASE_SECRET).length() > 0) url += "?auth=" + String(FIREBASE_SECRET);
       
       String payload = "{\"ip\":\"" + WiFi.localIP().toString() + "\",\"uptime\":" + String(millis() / 1000) + 
                        ",\"blocked\":" + String(totalBlocked) + ",\"allowed\":" + String(totalAllowed) + 
@@ -811,6 +813,7 @@ void loop() {
       String cmdUrl = firebaseDbUrl;
       if (!cmdUrl.endsWith("/")) cmdUrl += "/";
       cmdUrl += "devices/" + mac + "/command.json";
+      if (String(FIREBASE_SECRET).length() > 0) cmdUrl += "?auth=" + String(FIREBASE_SECRET);
       
       if (firebaseDbUrl.startsWith("https")) http.begin(client, cmdUrl);
       else http.begin(cmdUrl);
