@@ -20,7 +20,7 @@
 #include <sntp.h>
 
 // ---- remote management defaults ----
-#define FW_VERSION 100
+#define FW_VERSION 101
 #define DEFAULT_FIREBASE_URL                                                   \
   "https://esp-adblock-default-rtdb.europe-west1.firebasedatabase.app/"
 #define FIREBASE_SECRET "gXBgqzEGZEvLC1ARnoMKxCHpEQoPVAx5cPXg9PUy"
@@ -1305,18 +1305,14 @@ void loop() {
                        ",\"blocked\":" + String(totalBlocked) +
                        ",\"allowed\":" + String(totalAllowed) +
                        ",\"heap\":" + String(ESP.getFreeHeap()) +
+                       ",\"fw_version\":\"" + String(FW_VERSION) + "\"" +
                        ",\"lastSeen\": { \".sv\": \"timestamp\" }}";
 
-      static WiFiClientSecure fbClientTel;
-      static bool fbClientTelSetup = false;
-      if (!fbClientTelSetup) {
-        fbClientTel.setInsecure();
-        fbClientTelSetup = true;
-      }
+      WiFiClientSecure client;
+      client.setInsecure();
       HTTPClient http;
-      http.setReuse(true);
       if (firebaseDbUrl.startsWith("https"))
-        http.begin(fbClientTel, url);
+        http.begin(client, url);
       else
         http.begin(url);
 
@@ -1330,14 +1326,9 @@ void loop() {
       String mac = WiFi.macAddress();
       mac.replace(":", "");
       
-      static WiFiClientSecure fbClient;
-      static bool fbClientSetup = false;
-      if (!fbClientSetup) {
-        fbClient.setInsecure();
-        fbClientSetup = true;
-      }
+      WiFiClientSecure client;
+      client.setInsecure();
       HTTPClient http;
-      http.setReuse(true);
 
       // Check for remote commands
       String cmdUrl = firebaseDbUrl;
@@ -1348,7 +1339,7 @@ void loop() {
         cmdUrl += "?auth=" + String(FIREBASE_SECRET);
 
       if (firebaseDbUrl.startsWith("https"))
-        http.begin(fbClient, cmdUrl);
+        http.begin(client, cmdUrl);
       else
         http.begin(cmdUrl);
 
@@ -1357,25 +1348,25 @@ void loop() {
         String cmd = http.getString();
         cmd.replace("\"", ""); // remove quotes
         if (cmd == "reboot") {
-          if (firebaseDbUrl.startsWith("https")) http.begin(fbClient, cmdUrl); else http.begin(cmdUrl);
+          if (firebaseDbUrl.startsWith("https")) http.begin(client, cmdUrl); else http.begin(cmdUrl);
           http.addHeader("Content-Type", "application/json");
           http.PUT("null");
           http.end(); // clear command
           ESP.restart();
         } else if (cmd == "update_fw") {
-          if (firebaseDbUrl.startsWith("https")) http.begin(fbClient, cmdUrl); else http.begin(cmdUrl);
+          if (firebaseDbUrl.startsWith("https")) http.begin(client, cmdUrl); else http.begin(cmdUrl);
           http.addHeader("Content-Type", "application/json");
           http.PUT("null");
           http.end(); // clear command
           checkFirmwareUpdate();
         } else if (cmd == "ping") {
-          if (firebaseDbUrl.startsWith("https")) http.begin(fbClient, cmdUrl); else http.begin(cmdUrl);
+          if (firebaseDbUrl.startsWith("https")) http.begin(client, cmdUrl); else http.begin(cmdUrl);
           http.addHeader("Content-Type", "application/json");
           http.PUT("null");
           http.end(); // clear command
           lastTelemetryMs = 0; // force telemetry update on next loop iteration
         } else if (cmd == "update_blocklist") {
-          if (firebaseDbUrl.startsWith("https")) http.begin(fbClient, cmdUrl); else http.begin(cmdUrl);
+          if (firebaseDbUrl.startsWith("https")) http.begin(client, cmdUrl); else http.begin(cmdUrl);
           http.addHeader("Content-Type", "application/json");
           http.PUT("null");
           http.end(); // clear command
