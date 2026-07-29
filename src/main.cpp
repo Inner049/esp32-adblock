@@ -18,9 +18,10 @@
 #include <WiFiUdp.h>
 #include <time.h>
 #include <sntp.h>
+#include <Preferences.h>
 
 // ---- remote management defaults ----
-#define FW_VERSION 105
+#define FW_VERSION 106
 #define DEFAULT_FIREBASE_URL                                                   \
   "https://esp-adblock-default-rtdb.europe-west1.firebasedatabase.app/"
 #define FIREBASE_SECRET "gXBgqzEGZEvLC1ARnoMKxCHpEQoPVAx5cPXg9PUy"
@@ -46,7 +47,11 @@ bool servicesStarted = false;
 WiFiUDP dnsServer, upstreamCli;
 WebServer web(80);
 File blocklist;
+Preferences prefs;
 uint32_t numHashes = 0, totalBlocked = 0, totalAllowed = 0;
+uint32_t last_fw_ts = 0;
+uint32_t last_list_ts = 0;
+bool pendingFwTsSave = false;
 uint8_t buf[600];
 
 IPAddress upstreamDNS(9, 9, 9, 9); // configurable, saved in /dns.cfg
@@ -130,6 +135,8 @@ static void pushTelemetry() {
                    ",\"allowed\":" + String(totalAllowed) +
                    ",\"heap\":" + String(ESP.getFreeHeap()) +
                    ",\"fw_version\":\"" + String(FW_VERSION) + "\"," +
+                   "\"last_fw_ts\":" + String(last_fw_ts) + "," +
+                   "\"last_list_ts\":" + String(last_list_ts) + "," +
                    "\"status_msg\":\"" + actionStatus + "\"" +
                    ",\"lastSeen\": { \".sv\": \"timestamp\" }}";
 
@@ -995,9 +1002,9 @@ static void handleUpload() {
   }
 }
 
-static void checkFirmwareUpdate() {
+static String checkFirmwareUpdate() {
   if (!fwUpdateUrl.length())
-    return;
+    return "No FW URL set";
   Serial.println("[OTA] Checking for firmware update...");
   WiFiClientSecure client;
   client.setInsecure();
@@ -1019,14 +1026,19 @@ static void checkFirmwareUpdate() {
           Serial.printf("HTTP_UPDATE_FAILED Error (%d): %s\n",
                         httpUpdate.getLastError(),
                         httpUpdate.getLastErrorString().c_str());
+          return "FW Update Failed";
         }
+        return "Updating...";
       } else {
         Serial.println("[OTA] Up to date.");
+        return "No new versions";
       }
     } else {
       http.end();
+      return "Check Failed (HTTP " + String(code) + ")";
     }
   }
+  return "Check Failed";
 }
 
 static bool fetchBlocklist(String url) {
@@ -1236,6 +1248,15 @@ void setup() {
   loadDnsCfg();
   loadLangCfg();
 
+  prefs.begin("adblock", false);
+  int storedVer = prefs.getInt("fw_ver", 0);
+  if (storedVer != FW_VERSION) {
+    prefs.putInt("fw_ver", FW_VERSION);
+    pendingFwTsSave = true;
+  }
+  last_fw_ts = prefs.getUInt("last_fw_ts", 0);
+  last_list_ts = prefs.getUInt("last_list_ts", 0);
+
   checkBootButton();
 
   if (loadWifiCfg()) {
@@ -1336,11 +1357,20 @@ void loop() {
     }
   }
 
+  if (timeValid && pendingFwTsSave) {
+    prefs.putUInt("last_fw_ts", (uint32_t)nowTime);
+    last_fw_ts = (uint32_t)nowTime;
+    pendingFwTsSave = false;
+  }
+
   if (updateUrl.length() && timeValid) {
     static int lastUpdateDay = -1;
     if (timeinfo.tm_hour == 4 && timeinfo.tm_min == 0 && lastUpdateDay != timeinfo.tm_yday) {
       lastUpdateDay = timeinfo.tm_yday;
-      fetchBlocklist(updateUrl);
+      if (fetchBlocklist(updateUrl)) {
+        prefs.putUInt("last_list_ts", (uint32_t)nowTime);
+        last_list_ts = (uint32_t)nowTime;
+      }
     }
   }
 
@@ -1393,8 +1423,7 @@ void loop() {
           } else if (cmd == "update_fw") {
             actionStatus = "Downloading FW...";
             pushTelemetry();
-            checkFirmwareUpdate();
-            actionStatus = "FW Update Failed";
+            actionStatus = checkFirmwareUpdate();
             pushTelemetry();
           } else if (cmd == "ping") {
             actionStatus = "Ping received";
@@ -1402,7 +1431,10 @@ void loop() {
           } else if (cmd == "update_blocklist") {
             actionStatus = "Updating blocklist...";
             pushTelemetry();
-            fetchBlocklist(updateUrl);
+            if (fetchBlocklist(updateUrl) && timeValid) {
+              prefs.putUInt("last_list_ts", (uint32_t)nowTime);
+              last_list_ts = (uint32_t)nowTime;
+            }
             actionStatus = "Blocklist updated";
             pushTelemetry();
           }
