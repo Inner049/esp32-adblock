@@ -21,7 +21,7 @@
 #include <time.h>
 
 // ---- remote management defaults ----
-#define FW_VERSION 109
+#define FW_VERSION 110
 #define DEFAULT_FIREBASE_URL                                                   \
   "https://esp-adblock-default-rtdb.europe-west1.firebasedatabase.app/"
 #define FIREBASE_SECRET "gXBgqzEGZEvLC1ARnoMKxCHpEQoPVAx5cPXg9PUy"
@@ -676,20 +676,7 @@ h2{font-size:14px;color:#8b949e;margin:18px 0 8px}
 <h2 id=hCust></h2>
 <div style=margin-bottom:8px><input id=dom placeholder="ads.example.com" size=30><button onclick=addDom() id=bBlk></button></div>
 <table id=cl><tbody></tbody></table>
-<h2 id=hUp></h2>
-<form id=upf style=margin-bottom:6px><input type=file id=blf accept=.bin><button id=bUp></button> <span id=upmsg style=color:#8b949e></span></form>
-<div class=hlp id=upH></div>
-<h2 id=hRem></h2>
-<div style=margin-bottom:6px><input id=uurl placeholder="https://host/blocklist.bin" size=40> <span id=evL></span> <input id=uiv size=2 value=24><span id=hL></span>
-<button onclick=saveUpd() id=bSv></button> <button onclick=fetchNow() id=bFn></button></div>
-<div class=hlp><span id=remH></span> <span id=ustat>&mdash;</span></div>
-<h2 id=hCld>CLOUD TELEMETRY</h2>
-<div style=margin-bottom:6px><input id=furl placeholder="https://your-project.firebaseio.com" size=40>
-<button onclick=saveCld() id=bSvCld>Save</button></div>
-<div class=hlp id=cldH>Send device stats to Firebase RTDB or a custom dashboard</div>
-<h2 id=hFw></h2>
-<form id=fwf style=margin-bottom:6px><input type=file id=fwb accept=.bin><button id=bFl></button> <span id=fwmsg style=color:#8b949e></span></form>
-<div class=hlp id=fwH></div>
+
 <h2 id=hDns></h2>
 <div style=margin-bottom:6px>
 <select id=dsel><option value="9.9.9.9">Quad9 (9.9.9.9)</option><option value="1.1.1.1">Cloudflare (1.1.1.1)</option><option value="8.8.8.8">Google (8.8.8.8)</option><option value="208.67.222.222">OpenDNS (208.67.222.222)</option></select>
@@ -743,9 +730,9 @@ fl:'flashing',ul:'uploading',rb:'✓ rebooting ~15s',uf:'✗ failed',tst:'testin
 let lang='en';
 function t(k){return L[lang]&&L[lang][k]||L.en[k]||k}
 function fmt(n){return n.toLocaleString()}
-function tr(){['hCli','thCli','thBlk','thAlw','hCust','bBlk','hUp','bUp','hRem','bSv','bFn','hFw','bFl','hDns','bDn','bBe','bBA','hRst','bRs'].forEach(k=>{
+function tr(){['hCli','thCli','thBlk','thAlw','hCust','bBlk','hDns','bDn','bBe','bBA','hRst','bRs'].forEach(k=>{
 let e=document.getElementById(k);if(e)e.textContent=t(k)});
-['upH','fwH','rstW','remH','evL','hL','tL'].forEach(k=>{let e=document.getElementById(k);if(e)e.textContent=t(k)});
+['rstW','tL'].forEach(k=>{let e=document.getElementById(k);if(e)e.textContent=t(k)});
 document.querySelectorAll('.lb').forEach((b,i)=>{b.classList.toggle('on',['uk','ru','en'][i]==lang)})}
 async function load(){let s=await(await fetch('/stats.json')).json();
 if(s.lang){lang=s.lang;tr()}
@@ -757,32 +744,18 @@ ct.tBodies[0].innerHTML=s.clients.sort((a,b)=>(b.blocked+b.allowed)-(a.blocked+a
 <td class=b>${fmt(c.blocked)}</td><td class=a>${fmt(c.allowed)}</td>
 <td><button class=ban onclick="fetch('/ban?ip=${c.ip}').then(load)">${c.banned?t('unban'):t('ban')}</button></td></tr>`).join('');
 cl.tBodies[0].innerHTML=s.custom.map(d=>`<tr><td>${d}</td><td style=text-align:right><button onclick="fetch('/unblock?d='+encodeURIComponent('${d}')).then(load)">✕</button></td></tr>`).join('')||'<tr><td style=color:#8b949e>'+t('noCust')+'</td></tr>';
-if(document.activeElement!=uurl)uurl.value=s.upurl||'';
-if(document.activeElement!=uiv)uiv.value=s.upiv||24;
-ustat.textContent=s.upstat||'—';
-if(document.activeElement!=furl)furl.value=s.furl||'';
+
 if(document.activeElement!=dtout)dtout.value=s.dnstout||700;
 if(s.dns){let f=false;for(let o of dsel.options)if(o.value==s.dns){f=true;break}
 if(!f){let o=new Option('Custom ('+s.dns+')',s.dns);dsel.prepend(o)}
 dsel.value=s.dns}}
 function addDom(){let d=dom.value.trim();if(d){fetch('/addblock?d='+encodeURIComponent(d)).then(()=>{dom.value='';load()})}}
-function saveUpd(){fetch('/setupdate?u='+encodeURIComponent(uurl.value.trim())+'&h='+(parseInt(uiv.value)||24)).then(load)}
-function fetchNow(){ustat.textContent='...';fetch('/fetchnow').then(r=>r.text()).then(v=>{ustat.textContent=v;load()})}
-function saveCld(){fetch('/setcloud?u='+encodeURIComponent(furl.value.trim())).then(load)}
+
 function sL(l){fetch('/setlang?l='+l).then(()=>{lang=l;tr();load()})}
 function setDns(){fetch('/setdns?ip='+dsel.value+'&timeout='+(parseInt(dtout.value)||700)).then(load)}
 function bench(){bres.textContent=t('tst');fetch('/benchmark?ip='+dsel.value).then(r=>r.json()).then(d=>{bres.textContent=dsel.value+': min='+d.min+'ms avg='+d.avg+'ms max='+d.max+'ms'}).catch(()=>{bres.textContent='error'})}
 function benchAll(){bres.textContent=t('tst');fetch('/benchmarkall').then(r=>r.json()).then(d=>{bres.innerHTML=Object.entries(d).map(([k,v])=>k+': min='+v.min+'ms avg='+v.avg+'ms max='+v.max+'ms').join('<br>')}).catch(()=>{bres.textContent='error'})}
-fwf.onsubmit=async e=>{e.preventDefault();let f=fwb.files[0];if(!f)return;fwmsg.textContent=t('fl')+' '+(f.size/1048576).toFixed(2)+' MB...';
-let fd=new FormData();fd.append('f',f);
-try{let r=await fetch('/update',{method:'POST',body:fd});fwmsg.textContent=r.ok?t('rb'):'✗ '+await r.text();}
-catch(_){fwmsg.textContent=t('rb')}};
-upf.onsubmit=async e=>{e.preventDefault();let f=blf.files[0];if(!f)return;
-upmsg.textContent=t('ul')+' '+(f.size/1048576).toFixed(2)+' MB...';
-let fd=new FormData();fd.append('f',f);
-try{let r=await fetch('/upload',{method:'POST',body:fd});upmsg.textContent=r.ok?'✓':'✗ '+await r.text();}
-catch(_){upmsg.textContent=t('uf')}
-blf.value='';setTimeout(load,600);};
+
 load();setInterval(load,3000);
 </script></body></html>)HTML";
 
