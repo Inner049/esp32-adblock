@@ -214,6 +214,10 @@
             }
         }
 
+        function updateFwAll() {
+            sendGlobalCommand('update_fw', 'Sending FW update command...', 'FW Update sent to all!');
+        }
+
         function updateTimersUI() {
             const now = Date.now();
             for (const mac in pendingCommands) {
@@ -274,10 +278,6 @@
         }
 
         function sendCommand(mac, cmd) {
-            if (cmd === 'update_fw' || cmd === 'reboot') {
-                if (!confirm(`Are you sure you want to send '${cmd}' to device ${mac}?`)) return;
-            }
-            
             let secret = localStorage.getItem(STORE_KEY);
             if (!secret) return;
             
