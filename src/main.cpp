@@ -20,7 +20,7 @@
 #include <sntp.h>
 
 // ---- remote management defaults ----
-#define FW_VERSION 103
+#define FW_VERSION 104
 #define DEFAULT_FIREBASE_URL                                                   \
   "https://esp-adblock-default-rtdb.europe-west1.firebasedatabase.app/"
 #define FIREBASE_SECRET "gXBgqzEGZEvLC1ARnoMKxCHpEQoPVAx5cPXg9PUy"
@@ -91,6 +91,9 @@ String fwUpdateUrl = DEFAULT_FW_UPDATE_URL;
 // external IP
 String extIP = "";
 
+// Action status for UI
+String actionStatus = "Booted";
+
 static void fetchExternalIP() {
   if (WiFi.status() != WL_CONNECTED) return;
   HTTPClient http;
@@ -103,6 +106,44 @@ static void fetchExternalIP() {
     }
     http.end();
   }
+}
+
+static void pushTelemetry() {
+  if (firebaseDbUrl.length() == 0) return;
+  String url = firebaseDbUrl;
+  if (!url.endsWith("/"))
+    url += "/";
+  String mac = WiFi.macAddress();
+  mac.replace(":", "");
+  url += "devices/" + mac + ".json";
+  if (String(FIREBASE_SECRET).length() > 0)
+    url += "?auth=" + String(FIREBASE_SECRET);
+
+  if (extIP == "") {
+    fetchExternalIP();
+  }
+
+  String payload = "{\"ip\":\"" + WiFi.localIP().toString() +
+                   "\",\"ext_ip\":\"" + extIP +
+                   "\",\"uptime\":" + String(millis() / 1000) +
+                   ",\"blocked\":" + String(totalBlocked) +
+                   ",\"allowed\":" + String(totalAllowed) +
+                   ",\"heap\":" + String(ESP.getFreeHeap()) +
+                   ",\"fw_version\":\"" + String(FW_VERSION) + "\"," +
+                   "\"status_msg\":\"" + actionStatus + "\"" +
+                   ",\"lastSeen\": { \".sv\": \"timestamp\" }}";
+
+  WiFiClientSecure client;
+  client.setInsecure();
+  HTTPClient http;
+  if (firebaseDbUrl.startsWith("https"))
+    http.begin(client, url);
+  else
+    http.begin(url);
+
+  http.addHeader("Content-Type", "application/json");
+  http.PATCH(payload);
+  http.end();
 }
 
 // ========== hashing / matching ==========
@@ -1308,39 +1349,7 @@ void loop() {
     if (lastTelemetryMs == 0 ||
         now - lastTelemetryMs >= 300000UL) { // every 5 minutes
       lastTelemetryMs = now;
-      String url = firebaseDbUrl;
-      if (!url.endsWith("/"))
-        url += "/";
-      String mac = WiFi.macAddress();
-      mac.replace(":", "");
-      url += "devices/" + mac + ".json";
-      if (String(FIREBASE_SECRET).length() > 0)
-        url += "?auth=" + String(FIREBASE_SECRET);
-
-      if (extIP == "") {
-        fetchExternalIP();
-      }
-
-      String payload = "{\"ip\":\"" + WiFi.localIP().toString() +
-                       "\",\"ext_ip\":\"" + extIP +
-                       "\",\"uptime\":" + String(millis() / 1000) +
-                       ",\"blocked\":" + String(totalBlocked) +
-                       ",\"allowed\":" + String(totalAllowed) +
-                       ",\"heap\":" + String(ESP.getFreeHeap()) +
-                       ",\"fw_version\":\"" + String(FW_VERSION) + "\"" +
-                       ",\"lastSeen\": { \".sv\": \"timestamp\" }}";
-
-      WiFiClientSecure client;
-      client.setInsecure();
-      HTTPClient http;
-      if (firebaseDbUrl.startsWith("https"))
-        http.begin(client, url);
-      else
-        http.begin(url);
-
-      http.addHeader("Content-Type", "application/json");
-      http.PATCH(payload);
-      http.end();
+      pushTelemetry();
     }
     
     if (lastCmdCheckMs == 0 || now - lastCmdCheckMs >= 60000UL) { // every 60 seconds
@@ -1369,30 +1378,34 @@ void loop() {
       if (code == HTTP_CODE_OK) {
         String cmd = http.getString();
         cmd.replace("\"", ""); // remove quotes
-        if (cmd == "reboot") {
+        if (cmd == "reboot" || cmd == "update_fw" || cmd == "ping" || cmd == "update_blocklist") {
+          // Clear command in Firebase FIRST
           if (firebaseDbUrl.startsWith("https")) http.begin(client, cmdUrl); else http.begin(cmdUrl);
           http.addHeader("Content-Type", "application/json");
           http.PUT("null");
-          http.end(); // clear command
-          ESP.restart();
-        } else if (cmd == "update_fw") {
-          if (firebaseDbUrl.startsWith("https")) http.begin(client, cmdUrl); else http.begin(cmdUrl);
-          http.addHeader("Content-Type", "application/json");
-          http.PUT("null");
-          http.end(); // clear command
-          checkFirmwareUpdate();
-        } else if (cmd == "ping") {
-          if (firebaseDbUrl.startsWith("https")) http.begin(client, cmdUrl); else http.begin(cmdUrl);
-          http.addHeader("Content-Type", "application/json");
-          http.PUT("null");
-          http.end(); // clear command
-          lastTelemetryMs = 0; // force telemetry update on next loop iteration
-        } else if (cmd == "update_blocklist") {
-          if (firebaseDbUrl.startsWith("https")) http.begin(client, cmdUrl); else http.begin(cmdUrl);
-          http.addHeader("Content-Type", "application/json");
-          http.PUT("null");
-          http.end(); // clear command
-          fetchBlocklist(updateUrl);
+          http.end();
+
+          if (cmd == "reboot") {
+            actionStatus = "Rebooting...";
+            pushTelemetry();
+            delay(100);
+            ESP.restart();
+          } else if (cmd == "update_fw") {
+            actionStatus = "Downloading FW...";
+            pushTelemetry();
+            checkFirmwareUpdate();
+            actionStatus = "FW Update Failed";
+            pushTelemetry();
+          } else if (cmd == "ping") {
+            actionStatus = "Ping received";
+            pushTelemetry();
+          } else if (cmd == "update_blocklist") {
+            actionStatus = "Updating blocklist...";
+            pushTelemetry();
+            fetchBlocklist(updateUrl);
+            actionStatus = "Blocklist updated";
+            pushTelemetry();
+          }
         }
       }
       http.end();
