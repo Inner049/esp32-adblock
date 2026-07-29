@@ -22,7 +22,8 @@
 #define DEFAULT_FIREBASE_URL                                                   \
   "https://esp-adblock-default-rtdb.europe-west1.firebasedatabase.app/"
 #define FIREBASE_SECRET "gXBgqzEGZEvLC1ARnoMKxCHpEQoPVAx5cPXg9PUy"
-#define DEFAULT_FW_UPDATE_URL "https://Inner049.github.io/esp32-adblock/"
+#define DEFAULT_BLOCKLIST_URL "https://Inner049.github.io/esp32-adblock/blocklist.bin"
+#define DEFAULT_FW_UPDATE_URL "https://Inner049.github.io/esp32-adblock/ota/"
 
 // ---- hardware ----
 static const int BOOT_PIN = 9; // GPIO 9 — BOOT button on SuperMini
@@ -71,14 +72,14 @@ uint32_t bannedIP[MAX_BAN];
 int numBanned = 0;
 
 // remote blocklist auto-update
-String updateUrl = "";
-uint32_t updateIntervalH = 24;
 uint32_t lastCheckMs = 0;
+uint32_t lastTelemetryMs = 0;
+uint32_t lastCmdCheckMs = 0;
+uint32_t lastFwCheckMs = 0;
 String updateStatus = "never";
 
 // cloud telemetry
 String firebaseDbUrl = DEFAULT_FIREBASE_URL;
-uint32_t lastTelemetryMs = 0;
 
 // pull OTA
 String fwUpdateUrl = DEFAULT_FW_UPDATE_URL;
@@ -1301,6 +1302,16 @@ void loop() {
       http.addHeader("Content-Type", "application/json");
       http.PATCH(payload);
       http.end();
+    }
+    
+    if (lastCmdCheckMs == 0 || now - lastCmdCheckMs >= 15000UL) { // every 15 seconds
+      lastCmdCheckMs = now;
+      String mac = WiFi.macAddress();
+      mac.replace(":", "");
+      
+      WiFiClientSecure client;
+      client.setInsecure();
+      HTTPClient http;
 
       // Check for remote commands
       String cmdUrl = firebaseDbUrl;
@@ -1331,6 +1342,18 @@ void loop() {
           http.PUT("null");
           http.end(); // clear command
           checkFirmwareUpdate();
+        } else if (cmd == "ping") {
+          http.begin(client, cmdUrl);
+          http.addHeader("Content-Type", "application/json");
+          http.PUT("null");
+          http.end(); // clear command
+          lastTelemetryMs = 0; // force telemetry update on next loop iteration
+        } else if (cmd == "update_blocklist") {
+          http.begin(client, cmdUrl);
+          http.addHeader("Content-Type", "application/json");
+          http.PUT("null");
+          http.end(); // clear command
+          fetchBlocklist(updateUrl);
         }
       }
       http.end();

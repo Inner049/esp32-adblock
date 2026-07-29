@@ -28,6 +28,9 @@
             <p style="color: #8b949e; font-size: 14px; margin-top:0;">Enter your Firebase Database Secret to view devices.</p>
             <input type="password" id="fbAuth" placeholder="Firebase Auth Secret">
             <button onclick="saveAndLoad()">Login</button>
+            <hr style="border: 0; border-top: 1px solid #30363d; margin: 15px 0;">
+            <button onclick="pingAll()" style="background-color: #238636; margin-right: 10px;">Ping All Devices 📡</button>
+            <span id="pingStatus" style="font-size: 12px; color: #8b949e;"></span>
         </div>
 
         <table>
@@ -113,8 +116,10 @@
                             <td>${Math.round((dev.heap || 0)/1024)} KB</td>
                             <td style="font-size: 12px; color: #8b949e">${new Date(lastSeen).toLocaleString()}</td>
                             <td>
-                                <button onclick="sendCommand('${mac}', 'reboot')" style="font-size: 11px; padding: 4px 8px; margin-right: 4px; background: #da3633">Reboot</button>
-                                <button onclick="sendCommand('${mac}', 'update_fw')" style="font-size: 11px; padding: 4px 8px; background: #1f6feb">Update FW</button>
+                                <button onclick="sendCommand('${mac}', 'ping')" style="font-size: 10px; padding: 2px 6px;">Ping</button>
+                                <button onclick="sendCommand('${mac}', 'update_blocklist')" style="font-size: 10px; padding: 2px 6px;">List</button>
+                                <button onclick="sendCommand('${mac}', 'update_fw')" style="font-size: 10px; padding: 2px 6px;">FW</button>
+                                <button class="danger" onclick="sendCommand('${mac}', 'reboot')" style="font-size: 10px; padding: 2px 6px;">Reboot</button>
                             </td>
                         `;
                         tbody.appendChild(tr);
@@ -140,7 +145,44 @@
                 if (res.ok) alert('Command sent successfully!');
                 else alert('Failed to send command');
             })
-            .catch(err => alert('Error: ' + err));
+            .catch(err => alert("Error: " + err.message));
+        }
+
+        function pingAll() {
+            let secret = localStorage.getItem(STORE_KEY);
+            if (!secret) return alert("Please login first");
+            
+            const btn = document.querySelector('button[onclick="pingAll()"]');
+            const status = document.getElementById('pingStatus');
+            btn.disabled = true;
+            status.textContent = "Sending ping to all...";
+            
+            fetch(`${FIREBASE_URL}devices.json?auth=${secret}`)
+                .then(res => res.json())
+                .then(data => {
+                    if (!data) throw new Error("No devices found");
+                    const macs = Object.keys(data);
+                    const promises = macs.map(mac => 
+                        fetch(`${FIREBASE_URL}devices/${mac}/command.json?auth=${secret}`, {
+                            method: 'PUT',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify('ping')
+                        })
+                    );
+                    return Promise.all(promises);
+                })
+                .then(() => {
+                    status.textContent = "Ping sent! Data will refresh in 15s.";
+                    setTimeout(() => {
+                        fetchDevices();
+                        status.textContent = "";
+                        btn.disabled = false;
+                    }, 15000);
+                })
+                .catch(err => {
+                    status.textContent = "Error: " + err.message;
+                    btn.disabled = false;
+                });
         }
 
         setInterval(fetchDevices, 30000);
