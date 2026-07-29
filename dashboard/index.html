@@ -29,8 +29,11 @@
             <input type="password" id="fbAuth" placeholder="Firebase Auth Secret">
             <button onclick="saveAndLoad()">Login</button>
             <hr style="border: 0; border-top: 1px solid #30363d; margin: 15px 0;">
-            <button onclick="pingAll()" style="background-color: #238636; margin-right: 10px;">Ping All Devices 📡</button>
-            <span id="pingStatus" style="font-size: 12px; color: #8b949e;"></span>
+            <div style="display: flex; gap: 10px; align-items: center;">
+                <button onclick="pingAll()" style="background-color: #238636;">Ping All Devices 📡</button>
+                <button onclick="updateFwAll()" style="background-color: #1f6feb;">Update FW (All) 🚀</button>
+                <span id="globalStatus" style="font-size: 12px; color: #8b949e;"></span>
+            </div>
         </div>
 
         <table>
@@ -149,13 +152,21 @@
         }
 
         function pingAll() {
+            sendGlobalCommand('ping', 'Sending ping to all...', 'Ping sent! Data will refresh in 15s.');
+        }
+
+        function updateFwAll() {
+            if(confirm("Are you sure you want to update firmware on ALL devices?")) {
+                sendGlobalCommand('update_fw', 'Sending FW update command...', 'FW Update sent to all!');
+            }
+        }
+
+        function sendGlobalCommand(cmd, startMsg, endMsg) {
             let secret = localStorage.getItem(STORE_KEY);
             if (!secret) return alert("Please login first");
             
-            const btn = document.querySelector('button[onclick="pingAll()"]');
-            const status = document.getElementById('pingStatus');
-            btn.disabled = true;
-            status.textContent = "Sending ping to all...";
+            const status = document.getElementById('globalStatus');
+            status.textContent = startMsg;
             
             fetch(`${FIREBASE_URL}devices.json?auth=${secret}`)
                 .then(res => res.json())
@@ -166,22 +177,20 @@
                         fetch(`${FIREBASE_URL}devices/${mac}/command.json?auth=${secret}`, {
                             method: 'PUT',
                             headers: { 'Content-Type': 'application/json' },
-                            body: JSON.stringify('ping')
+                            body: JSON.stringify(cmd)
                         })
                     );
                     return Promise.all(promises);
                 })
                 .then(() => {
-                    status.textContent = "Ping sent! Data will refresh in 15s.";
+                    status.textContent = endMsg;
                     setTimeout(() => {
-                        fetchDevices();
+                        if(cmd === 'ping') fetchDevices();
                         status.textContent = "";
-                        btn.disabled = false;
                     }, 15000);
                 })
                 .catch(err => {
                     status.textContent = "Error: " + err.message;
-                    btn.disabled = false;
                 });
         }
 

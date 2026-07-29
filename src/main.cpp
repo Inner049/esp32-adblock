@@ -1386,13 +1386,5 @@ void loop() {
     }
   }
 
-  if (fwUpdateUrl.length() && timeValid) {
-    static int lastFwUpdateDay = -1;
-    if (timeinfo.tm_hour == 4 && timeinfo.tm_min == 10 && lastFwUpdateDay != timeinfo.tm_yday) {
-      lastFwUpdateDay = timeinfo.tm_yday;
-      checkFirmwareUpdate();
-    }
-  }
-
   delay(1);
 }
