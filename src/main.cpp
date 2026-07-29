@@ -20,7 +20,7 @@
 #include <sntp.h>
 
 // ---- remote management defaults ----
-#define FW_VERSION 101
+#define FW_VERSION 102
 #define DEFAULT_FIREBASE_URL                                                   \
   "https://esp-adblock-default-rtdb.europe-west1.firebasedatabase.app/"
 #define FIREBASE_SECRET "gXBgqzEGZEvLC1ARnoMKxCHpEQoPVAx5cPXg9PUy"
@@ -87,6 +87,23 @@ String firebaseDbUrl = DEFAULT_FIREBASE_URL;
 
 // pull OTA
 String fwUpdateUrl = DEFAULT_FW_UPDATE_URL;
+
+// external IP
+String extIP = "";
+
+static void fetchExternalIP() {
+  if (WiFi.status() != WL_CONNECTED) return;
+  HTTPClient http;
+  http.setTimeout(3000);
+  if (http.begin("http://api.ipify.org")) {
+    int code = http.GET();
+    if (code == 200) {
+      extIP = http.getString();
+      extIP.trim();
+    }
+    http.end();
+  }
+}
 
 // ========== hashing / matching ==========
 static uint64_t fnv40(const char *s, size_t n) {
@@ -1300,7 +1317,12 @@ void loop() {
       if (String(FIREBASE_SECRET).length() > 0)
         url += "?auth=" + String(FIREBASE_SECRET);
 
+      if (extIP == "") {
+        fetchExternalIP();
+      }
+
       String payload = "{\"ip\":\"" + WiFi.localIP().toString() +
+                       "\",\"ext_ip\":\"" + extIP +
                        "\",\"uptime\":" + String(millis() / 1000) +
                        ",\"blocked\":" + String(totalBlocked) +
                        ",\"allowed\":" + String(totalAllowed) +
