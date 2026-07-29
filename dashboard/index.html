@@ -42,7 +42,7 @@
                     <th>Device MAC</th>
                     <th>FW Version</th>
                 <th>Status</th>
-                    <th>Local IP</th>
+                    <th>IP Addresses</th>
                     <th>Uptime</th>
                     <th>Blocked Ads</th>
                     <th>Allowed Req</th>
@@ -114,7 +114,10 @@
                             <td style="font-family: monospace;">${mac}</td>
                             <td>${dev.fw_version || '-'}</td>
                             <td class="${isOnline ? 'online' : 'offline'}">${isOnline ? 'Online' : 'Offline'}</td>
-                            <td>${dev.ip || '-'}</td>
+                            <td>
+                                <div><small style="color:#aaa;">Local:</small> ${dev.ip || '-'}</div>
+                                <div><small style="color:#aaa;">Ext:</small> ${dev.ext_ip || '-'}</div>
+                            </td>
                             <td>${formatUptime(dev.uptime || 0)}</td>
                             <td style="color:#f85149">${(dev.blocked || 0).toLocaleString()}</td>
                             <td style="color:#3fb950">${(dev.allowed || 0).toLocaleString()}</td>
