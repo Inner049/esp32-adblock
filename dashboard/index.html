@@ -40,7 +40,8 @@
             <thead>
                 <tr>
                     <th>Device MAC</th>
-                    <th>Status</th>
+                    <th>FW Version</th>
+                <th>Status</th>
                     <th>Local IP</th>
                     <th>Uptime</th>
                     <th>Blocked Ads</th>
@@ -111,6 +112,7 @@
                         const tr = document.createElement('tr');
                         tr.innerHTML = `
                             <td style="font-family: monospace;">${mac}</td>
+                            <td>${dev.fw_version || '-'}</td>
                             <td class="${isOnline ? 'online' : 'offline'}">${isOnline ? 'Online' : 'Offline'}</td>
                             <td>${dev.ip || '-'}</td>
                             <td>${formatUptime(dev.uptime || 0)}</td>
