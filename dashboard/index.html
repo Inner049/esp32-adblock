@@ -6,7 +6,7 @@
     <title>ESP32 AdBlock Fleet</title>
     <style>
         body { font-family: system-ui, sans-serif; background: #0d1117; color: #c9d1d9; margin: 0; padding: 20px; }
-        .container { max-width: 1000px; margin: auto; }
+        .container { max-width: 1200px; margin: auto; }
         h1 { color: #3fb950; }
         table { width: 100%; border-collapse: collapse; background: #161b22; border-radius: 8px; overflow: hidden; margin-top: 20px; }
         th, td { padding: 12px; text-align: left; border-bottom: 1px solid #21262d; }
@@ -14,9 +14,56 @@
         .online { color: #3fb950; font-weight: bold; }
         .offline { color: #f85149; font-weight: bold; }
         .card { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 16px; margin-bottom: 20px; }
-        input[type="text"] { background: #0d1117; border: 1px solid #30363d; color: #c9d1d9; padding: 8px; border-radius: 4px; width: 400px; }
-        button { background: #238636; color: white; border: none; padding: 8px 16px; border-radius: 4px; cursor: pointer; }
-        button:hover { background: #2ea043; }
+        input[type="text"], input[type="password"] { background: #0d1117; border: 1px solid #30363d; color: #c9d1d9; padding: 8px; border-radius: 4px; width: 400px; }
+        button { background: #238636; color: white; border: none; padding: 8px 16px; border-radius: 4px; cursor: pointer; transition: 0.2s; }
+        button:hover:not(:disabled) { background: #2ea043; }
+        button:disabled { opacity: 0.5; cursor: not-allowed; }
+        .danger { background: #da3633; }
+        .danger:hover:not(:disabled) { background: #f85149; }
+        
+        .status-badge {
+            display: inline-block;
+            padding: 4px 8px;
+            border-radius: 12px;
+            background: #21262d;
+            font-size: 12px;
+            color: #8b949e;
+            border: 1px solid #30363d;
+        }
+        .status-badge.active {
+            border-color: #3fb950;
+            color: #3fb950;
+            background: rgba(63, 185, 80, 0.1);
+        }
+        
+        /* Toast Notification Container */
+        #toast-container {
+            position: fixed;
+            bottom: 20px;
+            right: 20px;
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+            z-index: 9999;
+        }
+        .toast {
+            background: #1f6feb;
+            color: white;
+            padding: 12px 20px;
+            border-radius: 6px;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.5);
+            font-size: 14px;
+            animation: slideIn 0.3s ease-out;
+            max-width: 300px;
+            word-wrap: break-word;
+        }
+        .toast.success { background: #238636; }
+        .toast.error { background: #da3633; }
+        
+        @keyframes slideIn {
+            from { transform: translateX(100%); opacity: 0; }
+            to { transform: translateX(0); opacity: 1; }
+        }
     </style>
 </head>
 <body>
@@ -40,9 +87,10 @@
             <thead>
                 <tr>
                     <th>Device MAC</th>
-                    <th>FW Version</th>
-                <th>Status</th>
+                    <th>FW Ver</th>
+                    <th>Status</th>
                     <th>IP Addresses</th>
+                    <th>Action Status</th>
                     <th>Uptime</th>
                     <th>Blocked Ads</th>
                     <th>Allowed Req</th>
@@ -52,26 +100,48 @@
                 </tr>
             </thead>
             <tbody id="devicesTable">
-                <tr><td colspan="8" style="text-align: center; color: #8b949e;">No database URL provided</td></tr>
+                <tr><td colspan="11" style="text-align: center; color: #8b949e;">No database URL provided</td></tr>
             </tbody>
         </table>
     </div>
+    
+    <div id="toast-container"></div>
 
     <script>
         const FIREBASE_URL = 'https://esp-adblock-default-rtdb.europe-west1.firebasedatabase.app/';
         const STORE_KEY = 'fb_auth_secret';
         const authInput = document.getElementById('fbAuth');
         
+        // State
+        let devicesData = {};
+        let pendingCommands = {}; // mac -> { cmd, startTime, sent }
+        let fetchIntervalId = null;
+        let uiTimerId = null;
+        let isRapidPolling = false;
+
         if (localStorage.getItem(STORE_KEY)) {
             authInput.value = localStorage.getItem(STORE_KEY);
-            fetchDevices();
+            startPolling();
+        }
+
+        function showToast(message, type = 'default') {
+            const container = document.getElementById('toast-container');
+            const toast = document.createElement('div');
+            toast.className = `toast ${type}`;
+            toast.textContent = message;
+            container.appendChild(toast);
+            setTimeout(() => {
+                toast.style.opacity = '0';
+                toast.style.transition = 'opacity 0.5s';
+                setTimeout(() => toast.remove(), 500);
+            }, 5000);
         }
 
         function saveAndLoad() {
             let secret = authInput.value.trim();
             if (!secret) return;
             localStorage.setItem(STORE_KEY, secret);
-            fetchDevices();
+            startPolling();
         }
 
         function formatUptime(seconds) {
@@ -80,6 +150,79 @@
             const m = Math.floor(seconds % 3600 / 60);
             if (d > 0) return `${d}d ${h}h`;
             return `${h}h ${m}m`;
+        }
+
+        function startPolling() {
+            fetchDevices();
+            if(fetchIntervalId) clearInterval(fetchIntervalId);
+            fetchIntervalId = setInterval(fetchDevices, isRapidPolling ? 2000 : 30000);
+            
+            if(!uiTimerId) {
+                uiTimerId = setInterval(updateTimersUI, 100);
+            }
+        }
+        
+        function setRapidPolling(active) {
+            if (isRapidPolling === active) return;
+            isRapidPolling = active;
+            startPolling(); // re-initiate with new interval
+        }
+
+        function renderTable() {
+            const tbody = document.getElementById('devicesTable');
+            tbody.innerHTML = '';
+            
+            if (!devicesData || Object.keys(devicesData).length === 0) {
+                tbody.innerHTML = '<tr><td colspan="11" style="text-align: center; color: #8b949e;">No devices found</td></tr>';
+                return;
+            }
+
+            for (const [mac, dev] of Object.entries(devicesData)) {
+                const lastSeen = dev.lastSeen || 0; 
+                const isOnline = (Date.now() - lastSeen) < 360000;
+                const isPending = pendingCommands[mac] !== undefined;
+                
+                const tr = document.createElement('tr');
+                tr.innerHTML = `
+                    <td style="font-family: monospace;">${mac}</td>
+                    <td>${dev.fw_version || '-'}</td>
+                    <td class="${isOnline ? 'online' : 'offline'}">${isOnline ? 'Online' : 'Offline'}</td>
+                    <td>
+                        <div><small style="color:#aaa;">Local:</small> ${dev.ip || '-'}</div>
+                        <div><small style="color:#aaa;">Ext:</small> ${dev.ext_ip || '-'}</div>
+                    </td>
+                    <td>
+                        <span class="status-badge ${dev.status_msg ? 'active' : ''}">${dev.status_msg || 'No status'}</span>
+                        ${dev.command ? `<br><small style="color:#f85149">Cmd queued: ${dev.command}</small>` : ''}
+                    </td>
+                    <td>${formatUptime(dev.uptime || 0)}</td>
+                    <td style="color:#f85149">${(dev.blocked || 0).toLocaleString()}</td>
+                    <td style="color:#3fb950">${(dev.allowed || 0).toLocaleString()}</td>
+                    <td>${Math.round((dev.heap || 0)/1024)} KB</td>
+                    <td style="font-size: 12px; color: #8b949e">${new Date(lastSeen).toLocaleString()}</td>
+                    <td>
+                        <div style="display: flex; gap: 4px;">
+                            <button id="btn-ping-${mac}" onclick="sendCommand('${mac}', 'ping')" style="font-size: 10px; padding: 2px 6px;" ${isPending ? 'disabled' : ''}>Ping</button>
+                            <button id="btn-list-${mac}" onclick="sendCommand('${mac}', 'update_blocklist')" style="font-size: 10px; padding: 2px 6px;" ${isPending ? 'disabled' : ''}>List</button>
+                            <button id="btn-fw-${mac}" onclick="sendCommand('${mac}', 'update_fw')" style="font-size: 10px; padding: 2px 6px;" ${isPending ? 'disabled' : ''}>FW</button>
+                            <button id="btn-reboot-${mac}" class="danger" onclick="sendCommand('${mac}', 'reboot')" style="font-size: 10px; padding: 2px 6px;" ${isPending ? 'disabled' : ''}>Reboot</button>
+                        </div>
+                        <div id="timer-${mac}" style="font-size: 10px; color: #1f6feb; margin-top: 4px; display: ${isPending ? 'block' : 'none'};"></div>
+                    </td>
+                `;
+                tbody.appendChild(tr);
+            }
+        }
+
+        function updateTimersUI() {
+            const now = Date.now();
+            for (const mac in pendingCommands) {
+                const el = document.getElementById(`timer-${mac}`);
+                if (el) {
+                    const elapsed = ((now - pendingCommands[mac].startTime) / 1000).toFixed(1);
+                    el.textContent = `Wait: ${elapsed}s`;
+                }
+            }
         }
 
         function fetchDevices() {
@@ -92,57 +235,56 @@
                     return res.json();
                 })
                 .then(data => {
-                    const tbody = document.getElementById('devicesTable');
-                    tbody.innerHTML = '';
-                    
-                    if (!data) {
-                        tbody.innerHTML = '<tr><td colspan="8" style="text-align: center; color: #8b949e;">No devices found</td></tr>';
-                        return;
-                    }
-
-                    // Firebase gives timestamp in ms, so Date.now() is fine. 
-                    // Let's ensure time formats match! Our ESP32 code uses: ".sv": "timestamp"
-                    // which returns milliseconds since epoch.
-                    const now = Date.now();
-                    
-                    for (const [mac, dev] of Object.entries(data)) {
-                        const lastSeen = dev.lastSeen || 0; 
-                        const isOnline = (Date.now() - lastSeen) < 360000;
-                        
-                        const tr = document.createElement('tr');
-                        tr.innerHTML = `
-                            <td style="font-family: monospace;">${mac}</td>
-                            <td>${dev.fw_version || '-'}</td>
-                            <td class="${isOnline ? 'online' : 'offline'}">${isOnline ? 'Online' : 'Offline'}</td>
-                            <td>
-                                <div><small style="color:#aaa;">Local:</small> ${dev.ip || '-'}</div>
-                                <div><small style="color:#aaa;">Ext:</small> ${dev.ext_ip || '-'}</div>
-                            </td>
-                            <td>${formatUptime(dev.uptime || 0)}</td>
-                            <td style="color:#f85149">${(dev.blocked || 0).toLocaleString()}</td>
-                            <td style="color:#3fb950">${(dev.allowed || 0).toLocaleString()}</td>
-                            <td>${Math.round((dev.heap || 0)/1024)} KB</td>
-                            <td style="font-size: 12px; color: #8b949e">${new Date(lastSeen).toLocaleString()}</td>
-                            <td>
-                                <button onclick="sendCommand('${mac}', 'ping')" style="font-size: 10px; padding: 2px 6px;">Ping</button>
-                                <button onclick="sendCommand('${mac}', 'update_blocklist')" style="font-size: 10px; padding: 2px 6px;">List</button>
-                                <button onclick="sendCommand('${mac}', 'update_fw')" style="font-size: 10px; padding: 2px 6px;">FW</button>
-                                <button class="danger" onclick="sendCommand('${mac}', 'reboot')" style="font-size: 10px; padding: 2px 6px;">Reboot</button>
-                            </td>
-                        `;
-                        tbody.appendChild(tr);
-                    }
+                    devicesData = data || {};
+                    checkPendingCommands();
+                    renderTable();
                 })
                 .catch(err => {
                     console.error(err);
-                    document.getElementById('devicesTable').innerHTML = `<tr><td colspan="9" style="color: #f85149;">Error loading data: ${err.message}</td></tr>`;
                 });
         }
 
+        function checkPendingCommands() {
+            let stillPending = false;
+            const now = Date.now();
+            
+            for (const mac in pendingCommands) {
+                const pending = pendingCommands[mac];
+                const dev = devicesData[mac];
+                
+                // If it's been sent and Firebase says the command field is null, it means ESP read it!
+                if (pending.sent && dev && !dev.command) {
+                    const elapsed = ((now - pending.startTime) / 1000).toFixed(1);
+                    showToast(`Device ${mac} acknowledged '${pending.cmd}' in ${elapsed}s! Status: ${dev.status_msg || 'Done'}`, 'success');
+                    delete pendingCommands[mac];
+                } else if (now - pending.startTime > 75000) {
+                    // Timeout after 75 seconds (ESP checks every 60s)
+                    showToast(`Device ${mac} did not respond to '${pending.cmd}' within 75s.`, 'error');
+                    delete pendingCommands[mac];
+                } else {
+                    stillPending = true;
+                }
+            }
+            
+            if (stillPending) {
+                setRapidPolling(true);
+            } else {
+                setRapidPolling(false);
+            }
+        }
+
         function sendCommand(mac, cmd) {
-            if (!confirm(`Are you sure you want to send '${cmd}' to device ${mac}?`)) return;
+            if (cmd === 'update_fw' || cmd === 'reboot') {
+                if (!confirm(`Are you sure you want to send '${cmd}' to device ${mac}?`)) return;
+            }
+            
             let secret = localStorage.getItem(STORE_KEY);
             if (!secret) return;
+            
+            // Optimistic UI update
+            pendingCommands[mac] = { cmd: cmd, startTime: Date.now(), sent: false };
+            renderTable();
+            setRapidPolling(true);
             
             fetch(`${FIREBASE_URL}devices/${mac}/command.json?auth=${secret}`, {
                 method: 'PUT',
@@ -150,20 +292,19 @@
                 body: JSON.stringify(cmd)
             })
             .then(res => {
-                if (res.ok) alert('Command sent successfully!');
-                else alert('Failed to send command');
+                if (res.ok) {
+                    pendingCommands[mac].sent = true;
+                } else {
+                    delete pendingCommands[mac];
+                    showToast(`Failed to send command to ${mac}`, 'error');
+                    renderTable();
+                }
             })
-            .catch(err => alert("Error: " + err.message));
-        }
-
-        function pingAll() {
-            sendGlobalCommand('ping', 'Sending ping to all...', 'Ping sent! Data will refresh in 15s.');
-        }
-
-        function updateFwAll() {
-            if(confirm("Are you sure you want to update firmware on ALL devices?")) {
-                sendGlobalCommand('update_fw', 'Sending FW update command...', 'FW Update sent to all!');
-            }
+            .catch(err => {
+                delete pendingCommands[mac];
+                showToast(`Error: ${err.message}`, 'error');
+                renderTable();
+            });
         }
 
         function sendGlobalCommand(cmd, startMsg, endMsg) {
@@ -173,33 +314,33 @@
             const status = document.getElementById('globalStatus');
             status.textContent = startMsg;
             
-            fetch(`${FIREBASE_URL}devices.json?auth=${secret}`)
-                .then(res => res.json())
-                .then(data => {
-                    if (!data) throw new Error("No devices found");
-                    const macs = Object.keys(data);
-                    const promises = macs.map(mac => 
-                        fetch(`${FIREBASE_URL}devices/${mac}/command.json?auth=${secret}`, {
-                            method: 'PUT',
-                            headers: { 'Content-Type': 'application/json' },
-                            body: JSON.stringify(cmd)
-                        })
-                    );
-                    return Promise.all(promises);
-                })
+            if (!devicesData) return;
+            
+            const macs = Object.keys(devicesData);
+            const promises = macs.map(mac => {
+                pendingCommands[mac] = { cmd: cmd, startTime: Date.now(), sent: false };
+                return fetch(`${FIREBASE_URL}devices/${mac}/command.json?auth=${secret}`, {
+                    method: 'PUT',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(cmd)
+                }).then(res => {
+                    if (res.ok) pendingCommands[mac].sent = true;
+                });
+            });
+            
+            renderTable();
+            setRapidPolling(true);
+            
+            Promise.all(promises)
                 .then(() => {
                     status.textContent = endMsg;
-                    setTimeout(() => {
-                        if(cmd === 'ping') fetchDevices();
-                        status.textContent = "";
-                    }, 15000);
+                    setTimeout(() => status.textContent = "", 5000);
                 })
                 .catch(err => {
                     status.textContent = "Error: " + err.message;
                 });
         }
 
-        setInterval(fetchDevices, 30000);
     </script>
 </body>
 </html>
