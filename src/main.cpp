@@ -72,6 +72,8 @@ uint32_t bannedIP[MAX_BAN];
 int numBanned = 0;
 
 // remote blocklist auto-update
+String updateUrl = DEFAULT_BLOCKLIST_URL;
+uint32_t updateIntervalH = 24;
 uint32_t lastCheckMs = 0;
 uint32_t lastTelemetryMs = 0;
 uint32_t lastCmdCheckMs = 0;
@@ -83,7 +85,6 @@ String firebaseDbUrl = DEFAULT_FIREBASE_URL;
 
 // pull OTA
 String fwUpdateUrl = DEFAULT_FW_UPDATE_URL;
-uint32_t lastFwCheckMs = 0;
 
 // ========== hashing / matching ==========
 static uint64_t fnv40(const char *s, size_t n) {
@@ -1291,11 +1292,16 @@ void loop() {
                        ",\"heap\":" + String(ESP.getFreeHeap()) +
                        ",\"lastSeen\": { \".sv\": \"timestamp\" }}";
 
-      WiFiClientSecure client;
-      client.setInsecure();
+      static WiFiClientSecure fbClientTel;
+      static bool fbClientTelSetup = false;
+      if (!fbClientTelSetup) {
+        fbClientTel.setInsecure();
+        fbClientTelSetup = true;
+      }
       HTTPClient http;
+      http.setReuse(true);
       if (firebaseDbUrl.startsWith("https"))
-        http.begin(client, url);
+        http.begin(fbClientTel, url);
       else
         http.begin(url);
 
@@ -1304,14 +1310,19 @@ void loop() {
       http.end();
     }
     
-    if (lastCmdCheckMs == 0 || now - lastCmdCheckMs >= 15000UL) { // every 15 seconds
+    if (lastCmdCheckMs == 0 || now - lastCmdCheckMs >= 60000UL) { // every 60 seconds
       lastCmdCheckMs = now;
       String mac = WiFi.macAddress();
       mac.replace(":", "");
       
-      WiFiClientSecure client;
-      client.setInsecure();
+      static WiFiClientSecure fbClient;
+      static bool fbClientSetup = false;
+      if (!fbClientSetup) {
+        fbClient.setInsecure();
+        fbClientSetup = true;
+      }
       HTTPClient http;
+      http.setReuse(true);
 
       // Check for remote commands
       String cmdUrl = firebaseDbUrl;
@@ -1322,7 +1333,7 @@ void loop() {
         cmdUrl += "?auth=" + String(FIREBASE_SECRET);
 
       if (firebaseDbUrl.startsWith("https"))
-        http.begin(client, cmdUrl);
+        http.begin(fbClient, cmdUrl);
       else
         http.begin(cmdUrl);
 
@@ -1331,25 +1342,25 @@ void loop() {
         String cmd = http.getString();
         cmd.replace("\"", ""); // remove quotes
         if (cmd == "reboot") {
-          http.begin(client, cmdUrl);
+          if (firebaseDbUrl.startsWith("https")) http.begin(fbClient, cmdUrl); else http.begin(cmdUrl);
           http.addHeader("Content-Type", "application/json");
           http.PUT("null");
           http.end(); // clear command
           ESP.restart();
         } else if (cmd == "update_fw") {
-          http.begin(client, cmdUrl);
+          if (firebaseDbUrl.startsWith("https")) http.begin(fbClient, cmdUrl); else http.begin(cmdUrl);
           http.addHeader("Content-Type", "application/json");
           http.PUT("null");
           http.end(); // clear command
           checkFirmwareUpdate();
         } else if (cmd == "ping") {
-          http.begin(client, cmdUrl);
+          if (firebaseDbUrl.startsWith("https")) http.begin(fbClient, cmdUrl); else http.begin(cmdUrl);
           http.addHeader("Content-Type", "application/json");
           http.PUT("null");
           http.end(); // clear command
           lastTelemetryMs = 0; // force telemetry update on next loop iteration
         } else if (cmd == "update_blocklist") {
-          http.begin(client, cmdUrl);
+          if (firebaseDbUrl.startsWith("https")) http.begin(fbClient, cmdUrl); else http.begin(cmdUrl);
           http.addHeader("Content-Type", "application/json");
           http.PUT("null");
           http.end(); // clear command

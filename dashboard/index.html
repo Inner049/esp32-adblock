@@ -103,7 +103,7 @@
                     
                     for (const [mac, dev] of Object.entries(data)) {
                         const lastSeen = dev.lastSeen || 0; 
-                        const isOnline = (now - lastSeen) < 600000; // 10 minutes timeout
+                        const isOnline = (Date.now() - lastSeen) < 360000;
                         
                         const tr = document.createElement('tr');
                         tr.innerHTML = `
