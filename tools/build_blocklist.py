@@ -29,8 +29,8 @@ U64 = (1 << 64) - 1
 # Want more (up to ~250k)? swap light.txt -> pro.txt is 370k and ONLY fits the
 # single-app (no-OTA) partition table.
 DEFAULT_SOURCES = [
-    'https://raw.githubusercontent.com/StevenBlack/hosts/master/hosts',            # base: ads + malware
-    'https://raw.githubusercontent.com/hagezi/dns-blocklists/main/domains/light.txt',  # Hagezi Light
+    'https://raw.githubusercontent.com/StevenBlack/hosts/master/hosts',            
+    'https://raw.githubusercontent.com/StevenBlack/hosts/master/alternates/fakenews-gambling-porn-social/hosts',
 ]
 
 def fnv(b: bytes) -> int:

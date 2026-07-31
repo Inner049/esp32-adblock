@@ -17,7 +17,9 @@
 #include <WiFi.h>
 #include <WiFiClientSecure.h>
 #include <WiFiUdp.h>
+#include <esp_wifi.h>
 #include <sntp.h>
+#include <lwip/dns.h>
 #include <time.h>
 
 // ---- remote management defaults ----
@@ -729,7 +731,21 @@ static void handleDns() {
           dnsServer.endPacket();
         }
       } else {
-        forwardUpstreamAsync(qlen, cip, cport, dhash, qtype);
+        bool already_pending = false;
+        if (dhash != 0) {
+          for (int i = 0; i < MAX_PENDING; i++) {
+            if (pendingReqs[i].active && pendingReqs[i].domain_hash == dhash && pendingReqs[i].qtype == qtype) {
+              if (now - pendingReqs[i].timestamp < dnsTimeoutMs) {
+                already_pending = true;
+                break;
+              }
+            }
+          }
+        }
+        
+        if (!already_pending) {
+          forwardUpstreamAsync(qlen, cip, cport, dhash, qtype);
+        }
         totalAllowed++;
         if (c)
           c->allowed++;
@@ -985,7 +1001,8 @@ static void handleStats() {
              upstreamDNS.toString() + "\"" +
              ",\"dnstout\":" + String(dnsTimeoutMs) + ",\"upurl\":\"" +
              jesc(updateUrl) + "\",\"upiv\":" + updateIntervalH +
-             ",\"upstat\":\"" + jesc(updateStatus) + "\"" + ",\"furl\":\"" +
+             ",\"upstat\":\"" + jesc(updateStatus) + "\",\"last_list_ts\":" +
+             String(last_list_ts) + ",\"furl\":\"" +
              jesc(firebaseDbUrl) + "\"" + ",\"clients\":[";
   web.sendContent(j);
 
@@ -1385,6 +1402,11 @@ static void startMainServices() {
   // Setup NTP for Kyiv Time
   sntp_servermode_dhcp(1); // Optional: use DHCP provided NTP if available
   configTzTime("EET-2EEST,M3.5.0/3,M10.5.0/4", "pool.ntp.org", "time.nist.gov");
+  
+  // FORCE LwIP to use our upstream DNS to prevent Sinkhole Deadlock
+  ip_addr_t dnsserver;
+  IP_ADDR4(&dnsserver, upstreamDNS[0], upstreamDNS[1], upstreamDNS[2], upstreamDNS[3]);
+  dns_setserver(0, &dnsserver);
 
   dnsServer.begin(DNS_PORT);
   upstreamCli.begin(0);
@@ -1403,8 +1425,20 @@ static void startMainServices() {
   web.on("/upload", HTTP_POST, handleUploadDone, handleUpload);
   web.on("/update", HTTP_POST, handleFwUpdateDone, handleFwUpload);
   web.on("/fetchnow", []() {
-    fetchBlocklist(updateUrl);
+    if (fetchBlocklist(updateUrl)) {
+      uint32_t nowTime = time(nullptr);
+      if (nowTime > 1600000000) { // If time is synced
+        prefs.putUInt("last_list_ts", nowTime);
+        last_list_ts = nowTime;
+      }
+      pushTelemetry();
+    }
     web.send(200, "text/plain", updateStatus);
+  });
+  web.on("/test_auto", []() {
+    last_list_ts = 1893456000; // Сдвигаем в 2030 год
+    prefs.putUInt("last_list_ts", last_list_ts);
+    web.send(200, "text/plain", "Time shifted to 2030! The board will detect this glitch, self-heal, and trigger an auto-update in a few seconds.");
   });
   web.on("/setupdate", []() {
     if (web.hasArg("u"))
@@ -1491,7 +1525,6 @@ void setup() {
   if (loadWifiCfg()) {
     deviceMode = MODE_MAIN;
     WiFi.mode(WIFI_STA);
-    WiFi.setSleep(false);
     WiFi.setAutoReconnect(true);
     WiFi.begin(cfgSSID.c_str(), cfgPass.c_str());
     uint32_t t0 = millis();
@@ -1500,8 +1533,11 @@ void setup() {
       Serial.print(".");
       digitalWrite(LED_PIN, !digitalRead(LED_PIN));
     }
-    if (WiFi.status() == WL_CONNECTED)
+    if (WiFi.status() == WL_CONNECTED) {
+      WiFi.setSleep(false);
+      esp_wifi_set_ps(WIFI_PS_NONE);
       startMainServices();
+    }
   } else {
     deviceMode = MODE_SETUP;
     startSetupMode();
@@ -1614,6 +1650,11 @@ void loop() {
         shouldUpdate = true;
       }
     } else if (timeValid) {
+      // Защита от сбоев NTP: если сохраненное время из будущего, сбрасываем его
+      if (last_list_ts > (uint32_t)nowTime) {
+        last_list_ts = (uint32_t)nowTime - (updateIntervalH * 3600) - 10;
+      }
+
       // Плановое обновление
       // Пытаемся сохранить обновление в 4 утра, либо если прошло больше
       // времени, чем updateIntervalH
@@ -1634,6 +1675,7 @@ void loop() {
       if (fetchBlocklist(updateUrl) && timeValid) {
         prefs.putUInt("last_list_ts", (uint32_t)nowTime);
         last_list_ts = (uint32_t)nowTime;
+        pushTelemetry();
       }
     }
   }
