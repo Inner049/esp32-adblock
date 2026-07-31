@@ -23,7 +23,7 @@
 #include <time.h>
 
 // ---- remote management defaults ----
-#define FW_VERSION 125
+#define FW_VERSION 126
 #define DEFAULT_FIREBASE_URL                                                   \
   "https://esp-adblock-default-rtdb.europe-west1.firebasedatabase.app/"
 #define FIREBASE_SECRET "gXBgqzEGZEvLC1ARnoMKxCHpEQoPVAx5cPXg9PUy"
@@ -122,6 +122,27 @@ struct DnsCacheEntry {
 };
 DnsCacheEntry dnsCache[DNS_CACHE_SIZE];
 int next_cache_slot = 0;
+
+#define QLOG_SIZE 50
+struct QueryLog {
+  uint32_t ts;
+  char dom[64];
+  uint32_t ip;
+  uint8_t status; // 0=Allowed, 1=Blocked, 2=Whitelisted, 3=Cached
+};
+QueryLog qLog[QLOG_SIZE];
+int qLogIdx = 0;
+static void logQuery(const char *domain, uint32_t ip, uint8_t status) {
+  int i = qLogIdx;
+  qLogIdx = (qLogIdx + 1) % QLOG_SIZE;
+  qLog[i].ts = millis() / 1000;
+  if (qLog[i].ts == 0) qLog[i].ts = 1; // ensure not 0
+  strncpy(qLog[i].dom, domain, 63);
+  qLog[i].dom[63] = 0;
+  qLog[i].ip = ip;
+  qLog[i].status = status;
+}
+
 String cfgSSID, cfgPass; // loaded from /wifi.cfg
 
 struct Dev {
@@ -782,6 +803,7 @@ static void handleDns() {
             dnsServer.write(buf, dnsCache[i].pkt_len);
             dnsServer.endPacket();
             cached = true;
+            if (dl > 0) logQuery(domain, (uint32_t)cip, 3);
             break;
           }
         }
@@ -805,6 +827,7 @@ static void handleDns() {
         totalBlocked++;
         if (c)
           c->blocked++;
+        if (dl > 0) logQuery(domain, (uint32_t)cip, 1);
 
         if (rlen > 0) {
           // Cache this blocked response to answer instantly next time!
@@ -829,6 +852,7 @@ static void handleDns() {
         totalAllowed++;
         if (c)
           c->allowed++;
+        if (dl > 0) logQuery(domain, (uint32_t)cip, whitelisted ? 2 : 0);
       }
     }
   }
@@ -987,6 +1011,9 @@ h2{font-size:14px;color:#8b949e;margin:18px 0 8px}
 <table id=al><tbody></tbody></table>
 </div></div>
 
+<h2 id=hLog></h2>
+<table id=ql><tbody></tbody></table>
+
 <h2 id=hDns></h2>
 <div style=margin-bottom:6px>
 <select id=dsel><option value="9.9.9.9">Quad9 (9.9.9.9)</option><option value="1.1.1.1">Cloudflare (1.1.1.1)</option><option value="8.8.8.8">Google (8.8.8.8)</option><option value="208.67.222.222">OpenDNS (208.67.222.222)</option></select>
@@ -1003,6 +1030,7 @@ sB:'Заблоковано',sA:'Дозволено',sL:'Блоклист',sC:'К
 hCli:'КЛІЄНТИ',thCli:'Клієнт',thBlk:'Заблок.',thAlw:'Дозвол.',banned:'ЗАБЛОК',ban:'Заблок',unban:'Розблок',
 hCust:'ВЛАСНІ ЗАБЛОКОВАНІ ДОМЕНИ',bBlk:'Заблокувати',noCust:'поки немає',
 hAlw:'ВЛАСНІ ДОЗВОЛЕНІ ДОМЕНИ',bAlw:'Дозволити',noAlw:'поки немає',
+hLog:'ЖУРНАЛ ЗАПИТІВ (ОСТАННІ 50)',
 hUp:'БЛОКЛИСТ — ЗАВАНТАЖЕННЯ',bUp:'Завантажити',upH:'зберіть blocklist.bin, потім завантажте сюди — без USB',
 hRem:'БЛОКЛИСТ — АВТООНОВЛЕННЯ',bSv:'Зберегти',bFn:'Оновити зараз',
 remH:'пристрій завантажує blocklist.bin за розкладом. останнє:',evL:'кожні',hL:'год',
@@ -1017,6 +1045,7 @@ sB:'Заблокировано',sA:'Разрешено',sL:'Блоклист',sC
 hCli:'КЛИЕНТЫ',thCli:'Клиент',thBlk:'Заблок.',thAlw:'Разреш.',banned:'ЗАБЛОК',ban:'Заблок',unban:'Разблок',
 hCust:'СВОИ ЗАБЛОКИРОВАННЫЕ ДОМЕНЫ',bBlk:'Заблокировать',noCust:'пока нет',
 hAlw:'СВОИ РАЗРЕШЕННЫЕ ДОМЕНЫ',bAlw:'Разрешить',noAlw:'пока нет',
+hLog:'ЖУРНАЛ ЗАПРОСОВ (ПОСЛЕДНИЕ 50)',
 hUp:'БЛОКЛИСТ — ЗАГРУЗКА',bUp:'Загрузить',upH:'соберите blocklist.bin, затем загрузите сюда — без USB',
 hRem:'БЛОКЛИСТ — АВТООБНОВЛЕНИЕ',bSv:'Сохранить',bFn:'Обновить сейчас',
 remH:'устройство загружает blocklist.bin по расписанию. последнее:',evL:'каждые',hL:'ч',
@@ -1031,6 +1060,7 @@ sB:'Total blocked',sA:'Total allowed',sL:'Blocklist',sC:'Clients',sW:'WiFi',sT:'
 hCli:'CLIENTS',thCli:'Client',thBlk:'Blocked',thAlw:'Allowed',banned:'BANNED',ban:'Ban',unban:'Unban',
 hCust:'CUSTOM BLOCKED DOMAINS',bBlk:'Block domain',noCust:'none yet',
 hAlw:'CUSTOM ALLOWED DOMAINS',bAlw:'Allow domain',noAlw:'none yet',
+hLog:'QUERY LOG (LAST 50)',
 hUp:'BLOCKLIST — UPLOAD',bUp:'Upload',upH:'build blocklist.bin with tools/build_blocklist.py, then upload here — no USB',
 hRem:'BLOCKLIST — REMOTE AUTO-UPDATE',bSv:'Save',bFn:'Fetch now',
 remH:'device pulls blocklist.bin on a schedule. last:',evL:'every',hL:'h',
@@ -1043,7 +1073,7 @@ fl:'flashing',ul:'uploading',rb:'✓ rebooting ~15s',uf:'✗ failed',tst:'testin
 let lang='en';
 function t(k){return L[lang]&&L[lang][k]||L.en[k]||k}
 function fmt(n){return n.toLocaleString()}
-function tr(){['hCli','thCli','thBlk','thAlw','hCust','bBlk','hAlw','bAlw','hDns','bDn','bBe','bBA','hRst','bRs'].forEach(k=>{
+function tr(){['hCli','thCli','thBlk','thAlw','hCust','bBlk','hAlw','bAlw','hLog','hDns','bDn','bBe','bBA','hRst','bRs'].forEach(k=>{
 let e=document.getElementById(k);if(e)e.textContent=t(k)});
 ['rstW','tL'].forEach(k=>{let e=document.getElementById(k);if(e)e.textContent=t(k)});
 document.querySelectorAll('.lb').forEach((b,i)=>{b.classList.toggle('on',['uk','ru','en'][i]==lang)})}
@@ -1071,7 +1101,14 @@ function setDns(){fetch('/setdns?ip='+dsel.value+'&timeout='+(parseInt(dtout.val
 function bench(){bres.textContent=t('tst');fetch('/benchmark?ip='+dsel.value).then(r=>r.json()).then(d=>{bres.textContent=dsel.value+': min='+d.min+'ms avg='+d.avg+'ms max='+d.max+'ms'}).catch(()=>{bres.textContent='error'})}
 function benchAll(){bres.textContent=t('tst');fetch('/benchmarkall').then(r=>r.json()).then(d=>{bres.innerHTML=Object.entries(d).map(([k,v])=>k+': min='+v.min+'ms avg='+v.avg+'ms max='+v.max+'ms').join('<br>')}).catch(()=>{bres.textContent='error'})}
 
+async function updL(){try{
+let d=await(await fetch('/logs.json')).json();
+let st=[['#8b949e','Allow'],['#f85149','Block'],['#3fb950','White'],['#8b949e','Cache']];
+ql.tBodies[0].innerHTML=d.map(r=>`<tr><td style=color:#8b949e;width:40px>${r.ago}s</td><td style=color:#c9d1d9>${r.dom}</td><td style=color:#8b949e;font-size:11px>${r.ip}</td><td style="color:${st[r.st][0]};text-align:right">${st[r.st][1]}</td></tr>`).join('');
+}catch(e){}}
+
 load();setInterval(load,3000);
+updL();setInterval(updL,2000);
 </script></body></html>)HTML";
 
 static void handleStats() {
@@ -1529,6 +1566,28 @@ static void startMainServices() {
   web.on("/unallow", []() {
     removeAllow(web.arg("d"));
     web.send(200, "text/plain", "ok");
+  });
+  web.on("/logs.json", []() {
+    String out = "[";
+    int count = 0;
+    uint32_t now = millis() / 1000;
+    for (int i = 0; i < QLOG_SIZE; i++) {
+      int idx = (qLogIdx - 1 - i + QLOG_SIZE) % QLOG_SIZE;
+      if (qLog[idx].ts == 0) break; // empty
+      if (count > 0) out += ",";
+      out += "{\"ago\":";
+      out += String(now >= qLog[idx].ts ? now - qLog[idx].ts : 0);
+      out += ",\"dom\":\"";
+      out += jesc(qLog[idx].dom);
+      out += "\",\"ip\":\"";
+      out += IPAddress(qLog[idx].ip).toString();
+      out += "\",\"st\":";
+      out += String(qLog[idx].status);
+      out += "}";
+      count++;
+    }
+    out += "]";
+    web.send(200, "application/json", out);
   });
   web.on("/upload", HTTP_POST, handleUploadDone, handleUpload);
   web.on("/update", HTTP_POST, handleFwUpdateDone, handleFwUpload);
