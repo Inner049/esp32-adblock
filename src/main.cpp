@@ -21,7 +21,7 @@
 #include <time.h>
 
 // ---- remote management defaults ----
-#define FW_VERSION 114
+#define FW_VERSION 115
 #define DEFAULT_FIREBASE_URL                                                   \
   "https://esp-adblock-default-rtdb.europe-west1.firebasedatabase.app/"
 #define FIREBASE_SECRET "gXBgqzEGZEvLC1ARnoMKxCHpEQoPVAx5cPXg9PUy"
@@ -59,7 +59,7 @@ IPAddress upstreamDNS(9, 9, 9, 9); // configurable, saved in /dns.cfg
 uint32_t dnsTimeoutMs = 700;       // configurable, saved in /dns.cfg
 String currentLang = "en";         // uk | ru | en, saved in /lang.cfg
 
-#define MAX_PENDING 256
+#define MAX_PENDING 1024
 struct PendingReq {
   uint16_t upstreamTid;
   uint16_t clientTid;
@@ -495,11 +495,14 @@ static int buildBlocked(int qend, uint16_t qtype) {
   return qend + sizeof(ans);
 }
 static void forwardUpstreamAsync(int qlen, IPAddress cip, uint16_t cport) {
+  static int last_slot = 0;
   int slot = -1;
   uint32_t now = millis();
   for (int i = 0; i < MAX_PENDING; i++) {
-    if (!pendingReqs[i].active || (now - pendingReqs[i].timestamp > dnsTimeoutMs)) {
-      slot = i;
+    int idx = (last_slot + i) % MAX_PENDING;
+    if (!pendingReqs[idx].active || (now - pendingReqs[idx].timestamp > dnsTimeoutMs)) {
+      slot = idx;
+      last_slot = (idx + 1) % MAX_PENDING;
       break;
     }
   }
@@ -1370,7 +1373,7 @@ void loop() {
       lb = millis();
       digitalWrite(LED_PIN, !digitalRead(LED_PIN));
     }
-    delay(1);
+    yield();
     return;
   }
 
@@ -1550,5 +1553,5 @@ void loop() {
     }
   }
 
-  delay(1);
+  yield();
 }
