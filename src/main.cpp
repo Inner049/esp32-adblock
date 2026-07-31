@@ -21,7 +21,7 @@
 #include <time.h>
 
 // ---- remote management defaults ----
-#define FW_VERSION 119
+#define FW_VERSION 120
 #define DEFAULT_FIREBASE_URL                                                   \
   "https://esp-adblock-default-rtdb.europe-west1.firebasedatabase.app/"
 #define FIREBASE_SECRET "gXBgqzEGZEvLC1ARnoMKxCHpEQoPVAx5cPXg9PUy"
@@ -59,7 +59,7 @@ IPAddress upstreamDNS(9, 9, 9, 9); // configurable, saved in /dns.cfg
 uint32_t dnsTimeoutMs = 700;       // configurable, saved in /dns.cfg
 String currentLang = "en";         // uk | ru | en, saved in /lang.cfg
 
-#define MAX_PENDING 1024
+#define MAX_PENDING 256
 struct PendingReq {
   uint16_t upstreamTid;
   uint16_t clientTid;
@@ -78,7 +78,7 @@ struct DnsCacheEntry {
   uint64_t hash;
   uint16_t qtype;
   uint32_t expire_ts;
-  uint8_t pkt[512];
+  uint8_t pkt[128];
   int pkt_len;
   bool active;
 };
@@ -552,7 +552,7 @@ static void handleUpstreamDns() {
       for (int i = 0; i < MAX_PENDING; i++) {
         if (pendingReqs[i].active && pendingReqs[i].upstreamTid == uTid) {
           
-          if (rlen <= 512 && pendingReqs[i].domain_hash != 0) {
+          if (rlen <= 128 && pendingReqs[i].domain_hash != 0) {
             int c_slot = next_cache_slot++;
             if (next_cache_slot >= DNS_CACHE_SIZE) next_cache_slot = 0;
             dnsCache[c_slot].hash = pendingReqs[i].domain_hash;
@@ -632,7 +632,7 @@ static void handleDns() {
         
         if (rlen > 0) {
           // Cache this blocked response to answer instantly next time!
-          if (rlen <= 512 && dhash != 0) {
+          if (rlen <= 128 && dhash != 0) {
             int c_slot = next_cache_slot++;
             if (next_cache_slot >= DNS_CACHE_SIZE) next_cache_slot = 0;
             dnsCache[c_slot].hash = dhash;
