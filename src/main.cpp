@@ -21,13 +21,13 @@
 #include <time.h>
 
 // ---- remote management defaults ----
-#define FW_VERSION 112
+#define FW_VERSION 114
 #define DEFAULT_FIREBASE_URL                                                   \
   "https://esp-adblock-default-rtdb.europe-west1.firebasedatabase.app/"
 #define FIREBASE_SECRET "gXBgqzEGZEvLC1ARnoMKxCHpEQoPVAx5cPXg9PUy"
 #define DEFAULT_BLOCKLIST_URL                                                  \
-  "https://Inner049.github.io/esp32-adblock/blocklist.bin"
-#define DEFAULT_FW_UPDATE_URL "https://Inner049.github.io/esp32-adblock/ota/"
+  "https://inner049.github.io/esp32-adblock/blocklist.bin"
+#define DEFAULT_FW_UPDATE_URL "https://inner049.github.io/esp32-adblock/ota/"
 
 // ---- hardware ----
 static const int BOOT_PIN = 9; // GPIO 9 — BOOT button on SuperMini
@@ -525,91 +525,98 @@ static void forwardUpstreamAsync(int qlen, IPAddress cip, uint16_t cport) {
 }
 
 static void handleUpstreamDns() {
-  int usz = upstreamCli.parsePacket();
-  if (usz <= 0) return;
-  int rlen = upstreamCli.read(buf, sizeof(buf));
-  if (rlen >= 2) {
-    uint16_t uTid = (buf[0] << 8) | buf[1];
-    for (int i = 0; i < MAX_PENDING; i++) {
-      if (pendingReqs[i].active && pendingReqs[i].upstreamTid == uTid) {
-        buf[0] = pendingReqs[i].clientTid >> 8;
-        buf[1] = pendingReqs[i].clientTid & 0xFF;
-        dnsServer.beginPacket(pendingReqs[i].clientIp, pendingReqs[i].clientPort);
-        dnsServer.write(buf, rlen);
-        dnsServer.endPacket();
-        pendingReqs[i].active = false;
-        break;
+  int usz;
+  while ((usz = upstreamCli.parsePacket()) > 0) {
+    int rlen = upstreamCli.read(buf, sizeof(buf));
+    if (rlen >= 2) {
+      uint16_t uTid = (buf[0] << 8) | buf[1];
+      for (int i = 0; i < MAX_PENDING; i++) {
+        if (pendingReqs[i].active && pendingReqs[i].upstreamTid == uTid) {
+          buf[0] = pendingReqs[i].clientTid >> 8;
+          buf[1] = pendingReqs[i].clientTid & 0xFF;
+          dnsServer.beginPacket(pendingReqs[i].clientIp, pendingReqs[i].clientPort);
+          dnsServer.write(buf, rlen);
+          dnsServer.endPacket();
+          pendingReqs[i].active = false;
+          break;
+        }
       }
     }
   }
 }
 static void handleDns() {
-  int sz = dnsServer.parsePacket();
-  if (sz <= 0)
-    return;
-  IPAddress cip = dnsServer.remoteIP();
-  uint16_t cport = dnsServer.remotePort();
-  int qlen = dnsServer.read(buf, sizeof(buf));
-  if (qlen < 13)
-    return;
-  char domain[256];
-  uint16_t qtype = 0;
-  int qend = qlen;
-  size_t dl = parseQuery(buf, qlen, domain, &qtype, &qend);
-  Dev *c = getClient((uint32_t)cip);
-  bool ban = c && c->banned;
-  bool blocked = ban || (dl && numHashes && isBlocked(domain));
-  if (blocked) {
-    int rlen = buildBlocked(qend, qtype);
-    totalBlocked++;
-    if (c)
-      c->blocked++;
-    if (rlen > 0) {
-      dnsServer.beginPacket(cip, cport);
-      dnsServer.write(buf, rlen);
-      dnsServer.endPacket();
+  int sz;
+  while ((sz = dnsServer.parsePacket()) > 0) {
+    IPAddress cip = dnsServer.remoteIP();
+    uint16_t cport = dnsServer.remotePort();
+    int qlen = dnsServer.read(buf, sizeof(buf));
+    if (qlen < 13)
+      continue;
+    char domain[256];
+    uint16_t qtype = 0;
+    int qend = qlen;
+    size_t dl = parseQuery(buf, qlen, domain, &qtype, &qend);
+    Dev *c = getClient((uint32_t)cip);
+    bool ban = c && c->banned;
+    bool blocked = ban || (dl && numHashes && isBlocked(domain));
+    
+    // NEVER block internal requests from the board itself (OTA/Telemetry)
+    if (cip == WiFi.localIP()) {
+      blocked = false;
     }
-  } else {
-    forwardUpstreamAsync(qlen, cip, cport);
-    totalAllowed++;
-    if (c)
-      c->allowed++;
+
+    if (blocked) {
+      int rlen = buildBlocked(qend, qtype);
+      totalBlocked++;
+      if (c)
+        c->blocked++;
+      if (rlen > 0) {
+        dnsServer.beginPacket(cip, cport);
+        dnsServer.write(buf, rlen);
+        dnsServer.endPacket();
+      }
+    } else {
+      forwardUpstreamAsync(qlen, cip, cport);
+      totalAllowed++;
+      if (c)
+        c->allowed++;
+    }
   }
 }
 
 // AP captive portal DNS: answer every A query with 192.168.4.1
 static void handleApDns() {
-  int sz = dnsServer.parsePacket();
-  if (sz <= 0)
-    return;
-  IPAddress cip = dnsServer.remoteIP();
-  uint16_t cport = dnsServer.remotePort();
-  int qlen = dnsServer.read(buf, sizeof(buf));
-  if (qlen < 13)
-    return;
-  char domain[256];
-  uint16_t qtype = 0;
-  int qend = qlen;
-  if (parseQuery(buf, qlen, domain, &qtype, &qend) == 0)
-    return;
-  buf[2] = 0x81;
-  buf[3] = 0x80;
-  buf[6] = 0;
-  buf[7] = (qtype == 1) ? 1 : 0;
-  buf[8] = 0;
-  buf[9] = 0;
-  buf[10] = 0;
-  buf[11] = 0;
-  int rlen = qend;
-  if (qtype == 1) {
-    const uint8_t ans[] = {0xC0, 0x0C, 0, 1, 0,   1,   0, 0,
-                           0,    60,   0, 4, 192, 168, 4, 1};
-    memcpy(buf + qend, ans, sizeof(ans));
-    rlen = qend + sizeof(ans);
+  int sz;
+  while ((sz = dnsServer.parsePacket()) > 0) {
+    IPAddress cip = dnsServer.remoteIP();
+    uint16_t cport = dnsServer.remotePort();
+    int qlen = dnsServer.read(buf, sizeof(buf));
+    if (qlen < 13)
+      continue;
+    char domain[256];
+    uint16_t qtype = 0;
+    int qend = qlen;
+    if (parseQuery(buf, qlen, domain, &qtype, &qend) == 0)
+      continue;
+    buf[2] = 0x81;
+    buf[3] = 0x80;
+    buf[6] = 0;
+    buf[7] = (qtype == 1) ? 1 : 0;
+    buf[8] = 0;
+    buf[9] = 0;
+    buf[10] = 0;
+    buf[11] = 0;
+    int rlen = qend;
+    if (qtype == 1) {
+      const uint8_t ans[] = {0xC0, 0x0C, 0, 1, 0,   1,   0, 0,
+                             0,    60,   0, 4, 192, 168, 4, 1};
+      memcpy(buf + qend, ans, sizeof(ans));
+      rlen = qend + sizeof(ans);
+    }
+    dnsServer.beginPacket(cip, cport);
+    dnsServer.write(buf, rlen);
+    dnsServer.endPacket();
   }
-  dnsServer.beginPacket(cip, cport);
-  dnsServer.write(buf, rlen);
-  dnsServer.endPacket();
 }
 
 // ========== web helpers ==========
@@ -1514,12 +1521,14 @@ void loop() {
           if (cmd == "reboot") {
             actionStatus = "Rebooting...";
             pushTelemetry();
-            delay(100);
+            delay(500);
             ESP.restart();
           } else if (cmd == "update_fw") {
             actionStatus = "Downloading FW...";
             pushTelemetry();
+            delay(500); // Give LwIP time to free sockets
             actionStatus = checkFirmwareUpdate();
+            delay(500);
             pushTelemetry();
           } else if (cmd == "ping") {
             actionStatus = "Ping received";
@@ -1527,6 +1536,7 @@ void loop() {
           } else if (cmd == "update_blocklist") {
             actionStatus = "Updating blocklist...";
             pushTelemetry();
+            delay(500);
             if (fetchBlocklist(updateUrl) && timeValid) {
               prefs.putUInt("last_list_ts", (uint32_t)nowTime);
               last_list_ts = (uint32_t)nowTime;
