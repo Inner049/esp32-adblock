@@ -18,12 +18,12 @@
 #include <WiFiClientSecure.h>
 #include <WiFiUdp.h>
 #include <esp_wifi.h>
-#include <sntp.h>
 #include <lwip/dns.h>
+#include <sntp.h>
 #include <time.h>
 
 // ---- remote management defaults ----
-#define FW_VERSION 123
+#define FW_VERSION 124
 #define DEFAULT_FIREBASE_URL                                                   \
   "https://esp-adblock-default-rtdb.europe-west1.firebasedatabase.app/"
 #define FIREBASE_SECRET "gXBgqzEGZEvLC1ARnoMKxCHpEQoPVAx5cPXg9PUy"
@@ -65,17 +65,19 @@ static void buildSparseIndex() {
     free(sparseIndex);
     sparseIndex = nullptr;
   }
-  if (numHashes == 0) return;
-  
+  if (numHashes == 0)
+    return;
+
   sparseCount = numHashes / 128;
-  if (numHashes % 128 != 0) sparseCount++;
-  
-  sparseIndex = (uint64_t*)malloc(sparseCount * sizeof(uint64_t));
+  if (numHashes % 128 != 0)
+    sparseCount++;
+
+  sparseIndex = (uint64_t *)malloc(sparseCount * sizeof(uint64_t));
   if (!sparseIndex) {
     Serial.println("Sparse index malloc failed!");
     return;
   }
-  
+
   uint8_t b[HASH_BYTES];
   for (size_t i = 0; i < sparseCount; i++) {
     blocklist.seek(i * 128 * HASH_BYTES);
@@ -86,7 +88,8 @@ static void buildSparseIndex() {
     }
     sparseIndex[i] = v;
   }
-  Serial.printf("Sparse index built: %u entries (%.1f KB)\n", sparseCount, (float)(sparseCount * 8) / 1024.0);
+  Serial.printf("Sparse index built: %u entries (%.1f KB)\n", sparseCount,
+                (float)(sparseCount * 8) / 1024.0);
 }
 
 IPAddress upstreamDNS(9, 9, 9, 9); // configurable, saved in /dns.cfg
@@ -227,14 +230,16 @@ static uint64_t fnv40(const char *s, size_t n) {
   return h & HASH_MASK;
 }
 static bool inFlash(uint64_t h) {
-  if (!blocklist || numHashes == 0) return false;
+  if (!blocklist || numHashes == 0)
+    return false;
 
   uint32_t start_idx = 0;
   uint32_t end_idx = numHashes - 1;
 
   if (sparseIndex && sparseCount > 0) {
-    if (h < sparseIndex[0]) return false;
-    
+    if (h < sparseIndex[0])
+      return false;
+
     int32_t L_s = 0;
     int32_t R_s = sparseCount - 1;
     uint32_t best_block = 0;
@@ -242,29 +247,34 @@ static bool inFlash(uint64_t h) {
     while (L_s <= R_s) {
       int32_t m_s = L_s + (R_s - L_s) / 2;
       uint64_t v_s = sparseIndex[m_s];
-      if (v_s == h) return true;
+      if (v_s == h)
+        return true;
       if (v_s < h) {
         best_block = m_s;
         L_s = m_s + 1;
       } else {
-        if (m_s == 0) break;
+        if (m_s == 0)
+          break;
         R_s = m_s - 1;
       }
     }
     start_idx = best_block * 128;
     end_idx = start_idx + 127;
-    if (end_idx >= numHashes) end_idx = numHashes - 1;
+    if (end_idx >= numHashes)
+      end_idx = numHashes - 1;
   }
 
   uint32_t count = end_idx - start_idx + 1;
-  if (count == 0) return false;
-  
+  if (count == 0)
+    return false;
+
   uint32_t bytes_to_read = count * HASH_BYTES;
   uint8_t fbuf[640];
-  
+
   blocklist.seek(start_idx * HASH_BYTES);
   size_t read_bytes = blocklist.read(fbuf, bytes_to_read);
-  if (read_bytes != bytes_to_read) return false;
+  if (read_bytes != bytes_to_read)
+    return false;
 
   int32_t L = 0;
   int32_t R = count - 1;
@@ -275,10 +285,13 @@ static bool inFlash(uint64_t h) {
     for (int i = 0; i < HASH_BYTES; i++) {
       v |= (uint64_t)fbuf[offset + i] << (8 * i);
     }
-    if (v == h) return true;
-    if (v < h) L = m + 1;
+    if (v == h)
+      return true;
+    if (v < h)
+      L = m + 1;
     else {
-      if (m == 0) break;
+      if (m == 0)
+        break;
       R = m - 1;
     }
   }
@@ -732,21 +745,7 @@ static void handleDns() {
           dnsServer.endPacket();
         }
       } else {
-        bool already_pending = false;
-        if (dhash != 0) {
-          for (int i = 0; i < MAX_PENDING; i++) {
-            if (pendingReqs[i].active && pendingReqs[i].domain_hash == dhash && pendingReqs[i].qtype == qtype) {
-              if (now - pendingReqs[i].timestamp < dnsTimeoutMs) {
-                already_pending = true;
-                break;
-              }
-            }
-          }
-        }
-        
-        if (!already_pending) {
-          forwardUpstreamAsync(qlen, cip, cport, dhash, qtype);
-        }
+        forwardUpstreamAsync(qlen, cip, cport, dhash, qtype);
         totalAllowed++;
         if (c)
           c->allowed++;
@@ -1002,8 +1001,8 @@ static void handleStats() {
              upstreamDNS.toString() + "\"" +
              ",\"dnstout\":" + String(dnsTimeoutMs) + ",\"upurl\":\"" +
              jesc(updateUrl) + "\",\"upiv\":" + updateIntervalH +
-             ",\"upstat\":\"" + jesc(updateStatus) + "\",\"last_list_ts\":" +
-             String(last_list_ts) + ",\"furl\":\"" +
+             ",\"upstat\":\"" + jesc(updateStatus) +
+             "\",\"last_list_ts\":" + String(last_list_ts) + ",\"furl\":\"" +
              jesc(firebaseDbUrl) + "\"" + ",\"clients\":[";
   web.sendContent(j);
 
@@ -1403,10 +1402,11 @@ static void startMainServices() {
   // Setup NTP for Kyiv Time
   sntp_servermode_dhcp(1); // Optional: use DHCP provided NTP if available
   configTzTime("EET-2EEST,M3.5.0/3,M10.5.0/4", "pool.ntp.org", "time.nist.gov");
-  
+
   // FORCE LwIP to use our upstream DNS to prevent Sinkhole Deadlock
   ip_addr_t dnsserver;
-  IP_ADDR4(&dnsserver, upstreamDNS[0], upstreamDNS[1], upstreamDNS[2], upstreamDNS[3]);
+  IP_ADDR4(&dnsserver, upstreamDNS[0], upstreamDNS[1], upstreamDNS[2],
+           upstreamDNS[3]);
   dns_setserver(0, &dnsserver);
 
   dnsServer.begin(DNS_PORT);
@@ -1439,7 +1439,9 @@ static void startMainServices() {
   web.on("/test_auto", []() {
     last_list_ts = 1893456000; // Сдвигаем в 2030 год
     prefs.putUInt("last_list_ts", last_list_ts);
-    web.send(200, "text/plain", "Time shifted to 2030! The board will detect this glitch, self-heal, and trigger an auto-update in a few seconds.");
+    web.send(200, "text/plain",
+             "Time shifted to 2030! The board will detect this glitch, "
+             "self-heal, and trigger an auto-update in a few seconds.");
   });
   web.on("/setupdate", []() {
     if (web.hasArg("u"))
