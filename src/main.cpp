@@ -21,7 +21,7 @@
 #include <time.h>
 
 // ---- remote management defaults ----
-#define FW_VERSION 116
+#define FW_VERSION 117
 #define DEFAULT_FIREBASE_URL                                                   \
   "https://esp-adblock-default-rtdb.europe-west1.firebasedatabase.app/"
 #define FIREBASE_SECRET "gXBgqzEGZEvLC1ARnoMKxCHpEQoPVAx5cPXg9PUy"
@@ -588,56 +588,70 @@ static void handleDns() {
     int qend = qlen;
     size_t dl = parseQuery(buf, qlen, domain, &qtype, &qend);
     Dev *c = getClient((uint32_t)cip);
-    bool ban = c && c->banned;
-    bool blocked = ban || (dl && numHashes && isBlocked(domain));
     
-    // NEVER block internal requests from the board itself (OTA/Telemetry)
-    if (cip == WiFi.localIP()) {
-      blocked = false;
-    }
-
-    if (blocked) {
-      int rlen = buildBlocked(qend, qtype);
-      totalBlocked++;
-      if (c)
-        c->blocked++;
-      if (rlen > 0) {
-        dnsServer.beginPacket(cip, cport);
-        dnsServer.write(buf, rlen);
-        dnsServer.endPacket();
-      }
-    } else {
-      uint64_t dhash = 0;
-      if (dl > 0) dhash = fnv40(domain, dl);
-      bool cached = false;
-      uint32_t now = millis();
-      
-      if (dhash != 0) {
-        for (int i = 0; i < DNS_CACHE_SIZE; i++) {
-          if (dnsCache[i].active && dnsCache[i].hash == dhash && dnsCache[i].qtype == qtype) {
-            if (now > dnsCache[i].expire_ts) {
-              dnsCache[i].active = false;
-            } else {
-              uint16_t cTid = (buf[0] << 8) | buf[1];
-              memcpy(buf, dnsCache[i].pkt, dnsCache[i].pkt_len);
-              buf[0] = cTid >> 8;
-              buf[1] = cTid & 0xFF;
-              dnsServer.beginPacket(cip, cport);
-              dnsServer.write(buf, dnsCache[i].pkt_len);
-              dnsServer.endPacket();
-              cached = true;
-              break;
-            }
+    uint64_t dhash = 0;
+    if (dl > 0) dhash = fnv40(domain, dl);
+    bool cached = false;
+    uint32_t now = millis();
+    
+    // 1. FAST PATH: Check RAM Cache First!
+    if (dhash != 0) {
+      for (int i = 0; i < DNS_CACHE_SIZE; i++) {
+        if (dnsCache[i].active && dnsCache[i].hash == dhash && dnsCache[i].qtype == qtype) {
+          if (now > dnsCache[i].expire_ts) {
+            dnsCache[i].active = false;
+          } else {
+            uint16_t cTid = (buf[0] << 8) | buf[1];
+            memcpy(buf, dnsCache[i].pkt, dnsCache[i].pkt_len);
+            buf[0] = cTid >> 8;
+            buf[1] = cTid & 0xFF;
+            dnsServer.beginPacket(cip, cport);
+            dnsServer.write(buf, dnsCache[i].pkt_len);
+            dnsServer.endPacket();
+            cached = true;
+            break;
           }
         }
       }
+    }
+    
+    // 2. SLOW PATH: If not in cache, check Flash Blocklist or Forward
+    if (!cached) {
+      bool ban = c && c->banned;
+      bool blocked = ban || (dl && numHashes && isBlocked(domain));
       
-      if (!cached) {
-        forwardUpstreamAsync(qlen, cip, cport, dhash, qtype);
+      // NEVER block internal requests from the board itself (OTA/Telemetry)
+      if (cip == WiFi.localIP()) {
+        blocked = false;
       }
-      totalAllowed++;
-      if (c)
-        c->allowed++;
+
+      if (blocked) {
+        int rlen = buildBlocked(qend, qtype);
+        totalBlocked++;
+        if (c) c->blocked++;
+        
+        if (rlen > 0) {
+          // Cache this blocked response to answer instantly next time!
+          if (rlen <= 512 && dhash != 0) {
+            int c_slot = next_cache_slot++;
+            if (next_cache_slot >= DNS_CACHE_SIZE) next_cache_slot = 0;
+            dnsCache[c_slot].hash = dhash;
+            dnsCache[c_slot].qtype = qtype;
+            dnsCache[c_slot].expire_ts = now + 300000; // 5 min TTL
+            memcpy(dnsCache[c_slot].pkt, buf, rlen);
+            dnsCache[c_slot].pkt_len = rlen;
+            dnsCache[c_slot].active = true;
+          }
+          
+          dnsServer.beginPacket(cip, cport);
+          dnsServer.write(buf, rlen);
+          dnsServer.endPacket();
+        }
+      } else {
+        forwardUpstreamAsync(qlen, cip, cport, dhash, qtype);
+        totalAllowed++;
+        if (c) c->allowed++;
+      }
     }
   }
 }
