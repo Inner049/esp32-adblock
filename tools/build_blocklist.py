@@ -29,8 +29,10 @@ U64 = (1 << 64) - 1
 # Want more (up to ~250k)? swap light.txt -> pro.txt is 370k and ONLY fits the
 # single-app (no-OTA) partition table.
 DEFAULT_SOURCES = [
-    'https://raw.githubusercontent.com/StevenBlack/hosts/master/hosts',            
-    'https://raw.githubusercontent.com/StevenBlack/hosts/master/alternates/fakenews-gambling-porn-social/hosts',
+    # 1. Base list (very safe, zero false positives)
+    'https://raw.githubusercontent.com/StevenBlack/hosts/master/hosts',
+    # 2. Official AdGuard Ukrainian Filter (strictly UA/CIS ad networks)
+    'https://filters.adtidy.org/extension/ublock/filters/23.txt'
 ]
 
 def fnv(b: bytes) -> int:
@@ -40,7 +42,12 @@ def fnv(b: bytes) -> int:
     return h & MASK                      # truncate to HASH_BYTES
 
 def norm(d: str) -> str:
-    d = d.strip().lower().lstrip('*').lstrip('.').rstrip('.')
+    d = d.strip().lower()
+    if d.startswith('||'):
+        d = d[2:]
+    if d.endswith('^'):
+        d = d[:-1]
+    d = d.lstrip('*').lstrip('.').rstrip('.')
     return d[4:] if d.startswith('www.') else d
 
 def read_source(src: str) -> str:
@@ -61,16 +68,29 @@ def main():
         except Exception as e:
             print(f'  !! skipped {src}: {e}', file=sys.stderr); continue
         for line in data.splitlines():
-            line = line.split('#', 1)[0].strip()
-            if not line or line[0] in '!/':
+            # Remove comments and adblock modifiers like $third-party
+            line = line.split('#', 1)[0].split('$', 1)[0].split('!', 1)[0].strip()
+            
+            # Ignore standard adblock exceptions and path-based rules
+            if not line or line.startswith('@@') or '/' in line or '=' in line or '?' in line:
                 continue
+                
             parts = line.split()
+            if not parts:
+                continue
+                
             d = parts[1] if len(parts) >= 2 and parts[0] in ('0.0.0.0','127.0.0.1','::1','::') \
-                else parts[0] if len(parts) == 1 else None
+                else parts[0]
+                
             if d:
                 d = norm(d)
-                if '.' in d and ' ' not in d:
+                # Ensure it's a valid clean domain
+                if '.' in d and ' ' not in d and '*' not in d and ':' not in d:
                     domains.add(d)
+
+    if not domains:
+        print("ERROR: No domains collected! Aborting to protect existing blocklist.", file=sys.stderr)
+        sys.exit(1)
 
     hashes = sorted(fnv(d.encode()) for d in domains)
     collisions = len(hashes) - len(set(hashes))
