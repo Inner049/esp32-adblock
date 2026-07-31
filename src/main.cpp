@@ -21,7 +21,7 @@
 #include <time.h>
 
 // ---- remote management defaults ----
-#define FW_VERSION 118
+#define FW_VERSION 119
 #define DEFAULT_FIREBASE_URL                                                   \
   "https://esp-adblock-default-rtdb.europe-west1.firebasedatabase.app/"
 #define FIREBASE_SECRET "gXBgqzEGZEvLC1ARnoMKxCHpEQoPVAx5cPXg9PUy"
@@ -1136,45 +1136,50 @@ static String checkFirmwareUpdate() {
   if (!fwUpdateUrl.length())
     return "No FW URL set";
   Serial.println("[OTA] Checking for firmware update...");
-  WiFiClientSecure client;
-  client.setInsecure();
-  HTTPClient http;
 
   String verUrl = fwUpdateUrl;
   if (!verUrl.endsWith("/"))
     verUrl += "/";
-  if (http.begin(client, verUrl + "version.txt")) {
-    int code = http.GET();
-    if (code == HTTP_CODE_OK) {
-      int remoteVer = http.getString().toInt();
-      http.end();
-      if (remoteVer > FW_VERSION) {
-        Serial.printf("[OTA] New version %d found! Updating...\n", remoteVer);
-        
-        WiFiClientSecure otaClient;
-        otaClient.setInsecure();
-        
-        httpUpdate.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
-        t_httpUpdate_return ret =
-            httpUpdate.update(otaClient, verUrl + "firmware.bin");
-            
-        if (ret == HTTP_UPDATE_FAILED) {
-          Serial.printf("HTTP_UPDATE_FAILED Error (%d): %s\n",
-                        httpUpdate.getLastError(),
-                        httpUpdate.getLastErrorString().c_str());
-          return "FW Update Failed";
-        }
-        return "Updating...";
-      } else {
-        Serial.println("[OTA] Up to date.");
-        return "No new versions";
+
+  int remoteVer = -1;
+  
+  // Create a strict scope for the version check so RAM is freed!
+  {
+    WiFiClientSecure client;
+    client.setInsecure();
+    HTTPClient http;
+    if (http.begin(client, verUrl + "version.txt")) {
+      int code = http.GET();
+      if (code == HTTP_CODE_OK) {
+        remoteVer = http.getString().toInt();
       }
-    } else {
       http.end();
-      return "Check Failed (HTTP " + String(code) + ")";
     }
+  } // `client` is destroyed here, freeing ~40KB of heap for the actual OTA update!
+
+  if (remoteVer > FW_VERSION) {
+    Serial.printf("[OTA] New version %d found! Updating...\n", remoteVer);
+    
+    WiFiClientSecure otaClient;
+    otaClient.setInsecure();
+    
+    httpUpdate.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
+    t_httpUpdate_return ret =
+        httpUpdate.update(otaClient, verUrl + "firmware.bin");
+        
+    if (ret == HTTP_UPDATE_FAILED) {
+      Serial.printf("HTTP_UPDATE_FAILED Error (%d): %s\n",
+                    httpUpdate.getLastError(),
+                    httpUpdate.getLastErrorString().c_str());
+      return "FW Update Failed";
+    }
+    return "Updating...";
+  } else if (remoteVer != -1) {
+    Serial.println("[OTA] Up to date.");
+    return "No new versions";
+  } else {
+    return "Check Failed (Network Error)";
   }
-  return "Check Failed";
 }
 
 static bool fetchBlocklist(String url) {
