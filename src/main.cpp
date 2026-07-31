@@ -21,7 +21,7 @@
 #include <time.h>
 
 // ---- remote management defaults ----
-#define FW_VERSION 115
+#define FW_VERSION 116
 #define DEFAULT_FIREBASE_URL                                                   \
   "https://esp-adblock-default-rtdb.europe-west1.firebasedatabase.app/"
 #define FIREBASE_SECRET "gXBgqzEGZEvLC1ARnoMKxCHpEQoPVAx5cPXg9PUy"
@@ -66,10 +66,24 @@ struct PendingReq {
   IPAddress clientIp;
   uint16_t clientPort;
   uint32_t timestamp;
+  uint64_t domain_hash;
+  uint16_t qtype;
   bool active;
 };
 PendingReq pendingReqs[MAX_PENDING];
 uint16_t nextUpstreamTid = 1;
+
+#define DNS_CACHE_SIZE 64
+struct DnsCacheEntry {
+  uint64_t hash;
+  uint16_t qtype;
+  uint32_t expire_ts;
+  uint8_t pkt[512];
+  int pkt_len;
+  bool active;
+};
+DnsCacheEntry dnsCache[DNS_CACHE_SIZE];
+int next_cache_slot = 0;
 String cfgSSID, cfgPass;           // loaded from /wifi.cfg
 
 struct Dev {
@@ -494,7 +508,7 @@ static int buildBlocked(int qend, uint16_t qtype) {
   memcpy(buf + qend, ans, sizeof(ans));
   return qend + sizeof(ans);
 }
-static void forwardUpstreamAsync(int qlen, IPAddress cip, uint16_t cport) {
+static void forwardUpstreamAsync(int qlen, IPAddress cip, uint16_t cport, uint64_t dhash, uint16_t qtype) {
   static int last_slot = 0;
   int slot = -1;
   uint32_t now = millis();
@@ -517,6 +531,8 @@ static void forwardUpstreamAsync(int qlen, IPAddress cip, uint16_t cport) {
   pendingReqs[slot].clientIp = cip;
   pendingReqs[slot].clientPort = cport;
   pendingReqs[slot].timestamp = now;
+  pendingReqs[slot].domain_hash = dhash;
+  pendingReqs[slot].qtype = qtype;
   pendingReqs[slot].active = true;
 
   buf[0] = uTid >> 8;
@@ -535,6 +551,18 @@ static void handleUpstreamDns() {
       uint16_t uTid = (buf[0] << 8) | buf[1];
       for (int i = 0; i < MAX_PENDING; i++) {
         if (pendingReqs[i].active && pendingReqs[i].upstreamTid == uTid) {
+          
+          if (rlen <= 512 && pendingReqs[i].domain_hash != 0) {
+            int c_slot = next_cache_slot++;
+            if (next_cache_slot >= DNS_CACHE_SIZE) next_cache_slot = 0;
+            dnsCache[c_slot].hash = pendingReqs[i].domain_hash;
+            dnsCache[c_slot].qtype = pendingReqs[i].qtype;
+            dnsCache[c_slot].expire_ts = millis() + 300000;
+            memcpy(dnsCache[c_slot].pkt, buf, rlen);
+            dnsCache[c_slot].pkt_len = rlen;
+            dnsCache[c_slot].active = true;
+          }
+
           buf[0] = pendingReqs[i].clientTid >> 8;
           buf[1] = pendingReqs[i].clientTid & 0xFF;
           dnsServer.beginPacket(pendingReqs[i].clientIp, pendingReqs[i].clientPort);
@@ -579,7 +607,34 @@ static void handleDns() {
         dnsServer.endPacket();
       }
     } else {
-      forwardUpstreamAsync(qlen, cip, cport);
+      uint64_t dhash = 0;
+      if (dl > 0) dhash = fnv40(domain, dl);
+      bool cached = false;
+      uint32_t now = millis();
+      
+      if (dhash != 0) {
+        for (int i = 0; i < DNS_CACHE_SIZE; i++) {
+          if (dnsCache[i].active && dnsCache[i].hash == dhash && dnsCache[i].qtype == qtype) {
+            if (now > dnsCache[i].expire_ts) {
+              dnsCache[i].active = false;
+            } else {
+              uint16_t cTid = (buf[0] << 8) | buf[1];
+              memcpy(buf, dnsCache[i].pkt, dnsCache[i].pkt_len);
+              buf[0] = cTid >> 8;
+              buf[1] = cTid & 0xFF;
+              dnsServer.beginPacket(cip, cport);
+              dnsServer.write(buf, dnsCache[i].pkt_len);
+              dnsServer.endPacket();
+              cached = true;
+              break;
+            }
+          }
+        }
+      }
+      
+      if (!cached) {
+        forwardUpstreamAsync(qlen, cip, cport, dhash, qtype);
+      }
       totalAllowed++;
       if (c)
         c->allowed++;
