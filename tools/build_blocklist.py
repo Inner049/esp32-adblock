@@ -31,7 +31,9 @@ U64 = (1 << 64) - 1
 DEFAULT_SOURCES = [
     # 1. Base list (very safe, zero false positives)
     'https://raw.githubusercontent.com/StevenBlack/hosts/master/hosts',
-    # 2. Official AdGuard Ukrainian Filter (strictly UA/CIS ad networks)
+    # 2. AdGuard DNS Filter (Aggressive ad blocking designed specifically for DNS sinkholes)
+    'https://raw.githubusercontent.com/AdguardTeam/FiltersRegistry/master/filters/filter_15_DnsFilter/filter.txt',
+    # 3. Official AdGuard Ukrainian Filter (strictly UA/CIS ad networks)
     'https://filters.adtidy.org/extension/ublock/filters/23.txt'
 ]
 
