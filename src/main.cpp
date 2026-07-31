@@ -21,7 +21,7 @@
 #include <time.h>
 
 // ---- remote management defaults ----
-#define FW_VERSION 120
+#define FW_VERSION 122
 #define DEFAULT_FIREBASE_URL                                                   \
   "https://esp-adblock-default-rtdb.europe-west1.firebasedatabase.app/"
 #define FIREBASE_SECRET "gXBgqzEGZEvLC1ARnoMKxCHpEQoPVAx5cPXg9PUy"
@@ -55,6 +55,38 @@ uint32_t last_list_ts = 0;
 bool pendingFwTsSave = false;
 uint8_t buf[600];
 
+uint64_t *sparseIndex = nullptr;
+size_t sparseCount = 0;
+
+static void buildSparseIndex() {
+  if (sparseIndex) {
+    free(sparseIndex);
+    sparseIndex = nullptr;
+  }
+  if (numHashes == 0) return;
+  
+  sparseCount = numHashes / 128;
+  if (numHashes % 128 != 0) sparseCount++;
+  
+  sparseIndex = (uint64_t*)malloc(sparseCount * sizeof(uint64_t));
+  if (!sparseIndex) {
+    Serial.println("Sparse index malloc failed!");
+    return;
+  }
+  
+  uint8_t b[HASH_BYTES];
+  for (size_t i = 0; i < sparseCount; i++) {
+    blocklist.seek(i * 128 * HASH_BYTES);
+    blocklist.read(b, HASH_BYTES);
+    uint64_t v = 0;
+    for (int k = 0; k < HASH_BYTES; k++) {
+      v |= (uint64_t)b[k] << (8 * k);
+    }
+    sparseIndex[i] = v;
+  }
+  Serial.printf("Sparse index built: %u entries (%.1f KB)\n", sparseCount, (float)(sparseCount * 8) / 1024.0);
+}
+
 IPAddress upstreamDNS(9, 9, 9, 9); // configurable, saved in /dns.cfg
 uint32_t dnsTimeoutMs = 700;       // configurable, saved in /dns.cfg
 String currentLang = "en";         // uk | ru | en, saved in /lang.cfg
@@ -73,7 +105,7 @@ struct PendingReq {
 PendingReq pendingReqs[MAX_PENDING];
 uint16_t nextUpstreamTid = 1;
 
-#define DNS_CACHE_SIZE 64
+#define DNS_CACHE_SIZE 128
 struct DnsCacheEntry {
   uint64_t hash;
   uint16_t qtype;
@@ -84,7 +116,7 @@ struct DnsCacheEntry {
 };
 DnsCacheEntry dnsCache[DNS_CACHE_SIZE];
 int next_cache_slot = 0;
-String cfgSSID, cfgPass;           // loaded from /wifi.cfg
+String cfgSSID, cfgPass; // loaded from /wifi.cfg
 
 struct Dev {
   uint32_t ip;
@@ -192,21 +224,60 @@ static uint64_t fnv40(const char *s, size_t n) {
   return h & HASH_MASK;
 }
 static bool inFlash(uint64_t h) {
-  int32_t lo = 0, hi = (int32_t)numHashes - 1;
-  uint8_t b[HASH_BYTES];
-  while (lo <= hi) {
-    int32_t mid = (lo + hi) >> 1;
-    blocklist.seek((uint32_t)mid * HASH_BYTES);
-    blocklist.read(b, HASH_BYTES);
+  if (!blocklist || numHashes == 0) return false;
+
+  uint32_t start_idx = 0;
+  uint32_t end_idx = numHashes - 1;
+
+  if (sparseIndex && sparseCount > 0) {
+    if (h < sparseIndex[0]) return false;
+    
+    int32_t L_s = 0;
+    int32_t R_s = sparseCount - 1;
+    uint32_t best_block = 0;
+
+    while (L_s <= R_s) {
+      int32_t m_s = L_s + (R_s - L_s) / 2;
+      uint64_t v_s = sparseIndex[m_s];
+      if (v_s == h) return true;
+      if (v_s < h) {
+        best_block = m_s;
+        L_s = m_s + 1;
+      } else {
+        if (m_s == 0) break;
+        R_s = m_s - 1;
+      }
+    }
+    start_idx = best_block * 128;
+    end_idx = start_idx + 127;
+    if (end_idx >= numHashes) end_idx = numHashes - 1;
+  }
+
+  uint32_t count = end_idx - start_idx + 1;
+  if (count == 0) return false;
+  
+  uint32_t bytes_to_read = count * HASH_BYTES;
+  uint8_t fbuf[640];
+  
+  blocklist.seek(start_idx * HASH_BYTES);
+  size_t read_bytes = blocklist.read(fbuf, bytes_to_read);
+  if (read_bytes != bytes_to_read) return false;
+
+  int32_t L = 0;
+  int32_t R = count - 1;
+  while (L <= R) {
+    int32_t m = L + (R - L) / 2;
+    uint32_t offset = m * HASH_BYTES;
     uint64_t v = 0;
-    for (int k = 0; k < HASH_BYTES; k++)
-      v |= (uint64_t)b[k] << (8 * k);
-    if (v < h)
-      lo = mid + 1;
-    else if (v > h)
-      hi = mid - 1;
-    else
-      return true;
+    for (int i = 0; i < HASH_BYTES; i++) {
+      v |= (uint64_t)fbuf[offset + i] << (8 * i);
+    }
+    if (v == h) return true;
+    if (v < h) L = m + 1;
+    else {
+      if (m == 0) break;
+      R = m - 1;
+    }
   }
   return false;
 }
@@ -508,23 +579,27 @@ static int buildBlocked(int qend, uint16_t qtype) {
   memcpy(buf + qend, ans, sizeof(ans));
   return qend + sizeof(ans);
 }
-static void forwardUpstreamAsync(int qlen, IPAddress cip, uint16_t cport, uint64_t dhash, uint16_t qtype) {
+static void forwardUpstreamAsync(int qlen, IPAddress cip, uint16_t cport,
+                                 uint64_t dhash, uint16_t qtype) {
   static int last_slot = 0;
   int slot = -1;
   uint32_t now = millis();
   for (int i = 0; i < MAX_PENDING; i++) {
     int idx = (last_slot + i) % MAX_PENDING;
-    if (!pendingReqs[idx].active || (now - pendingReqs[idx].timestamp > dnsTimeoutMs)) {
+    if (!pendingReqs[idx].active ||
+        (now - pendingReqs[idx].timestamp > dnsTimeoutMs)) {
       slot = idx;
       last_slot = (idx + 1) % MAX_PENDING;
       break;
     }
   }
-  if (slot == -1) return;
+  if (slot == -1)
+    return;
 
   uint16_t cTid = (buf[0] << 8) | buf[1];
   uint16_t uTid = nextUpstreamTid++;
-  if (nextUpstreamTid == 0) nextUpstreamTid = 1;
+  if (nextUpstreamTid == 0)
+    nextUpstreamTid = 1;
 
   pendingReqs[slot].upstreamTid = uTid;
   pendingReqs[slot].clientTid = cTid;
@@ -551,10 +626,11 @@ static void handleUpstreamDns() {
       uint16_t uTid = (buf[0] << 8) | buf[1];
       for (int i = 0; i < MAX_PENDING; i++) {
         if (pendingReqs[i].active && pendingReqs[i].upstreamTid == uTid) {
-          
+
           if (rlen <= 128 && pendingReqs[i].domain_hash != 0) {
             int c_slot = next_cache_slot++;
-            if (next_cache_slot >= DNS_CACHE_SIZE) next_cache_slot = 0;
+            if (next_cache_slot >= DNS_CACHE_SIZE)
+              next_cache_slot = 0;
             dnsCache[c_slot].hash = pendingReqs[i].domain_hash;
             dnsCache[c_slot].qtype = pendingReqs[i].qtype;
             dnsCache[c_slot].expire_ts = millis() + 300000;
@@ -565,7 +641,8 @@ static void handleUpstreamDns() {
 
           buf[0] = pendingReqs[i].clientTid >> 8;
           buf[1] = pendingReqs[i].clientTid & 0xFF;
-          dnsServer.beginPacket(pendingReqs[i].clientIp, pendingReqs[i].clientPort);
+          dnsServer.beginPacket(pendingReqs[i].clientIp,
+                                pendingReqs[i].clientPort);
           dnsServer.write(buf, rlen);
           dnsServer.endPacket();
           pendingReqs[i].active = false;
@@ -588,16 +665,18 @@ static void handleDns() {
     int qend = qlen;
     size_t dl = parseQuery(buf, qlen, domain, &qtype, &qend);
     Dev *c = getClient((uint32_t)cip);
-    
+
     uint64_t dhash = 0;
-    if (dl > 0) dhash = fnv40(domain, dl);
+    if (dl > 0)
+      dhash = fnv40(domain, dl);
     bool cached = false;
     uint32_t now = millis();
-    
+
     // 1. FAST PATH: Check RAM Cache First!
     if (dhash != 0) {
       for (int i = 0; i < DNS_CACHE_SIZE; i++) {
-        if (dnsCache[i].active && dnsCache[i].hash == dhash && dnsCache[i].qtype == qtype) {
+        if (dnsCache[i].active && dnsCache[i].hash == dhash &&
+            dnsCache[i].qtype == qtype) {
           if (now > dnsCache[i].expire_ts) {
             dnsCache[i].active = false;
           } else {
@@ -614,12 +693,12 @@ static void handleDns() {
         }
       }
     }
-    
+
     // 2. SLOW PATH: If not in cache, check Flash Blocklist or Forward
     if (!cached) {
       bool ban = c && c->banned;
       bool blocked = ban || (dl && numHashes && isBlocked(domain));
-      
+
       // NEVER block internal requests from the board itself (OTA/Telemetry)
       if (cip == WiFi.localIP()) {
         blocked = false;
@@ -628,13 +707,15 @@ static void handleDns() {
       if (blocked) {
         int rlen = buildBlocked(qend, qtype);
         totalBlocked++;
-        if (c) c->blocked++;
-        
+        if (c)
+          c->blocked++;
+
         if (rlen > 0) {
           // Cache this blocked response to answer instantly next time!
           if (rlen <= 128 && dhash != 0) {
             int c_slot = next_cache_slot++;
-            if (next_cache_slot >= DNS_CACHE_SIZE) next_cache_slot = 0;
+            if (next_cache_slot >= DNS_CACHE_SIZE)
+              next_cache_slot = 0;
             dnsCache[c_slot].hash = dhash;
             dnsCache[c_slot].qtype = qtype;
             dnsCache[c_slot].expire_ts = now + 300000; // 5 min TTL
@@ -642,7 +723,7 @@ static void handleDns() {
             dnsCache[c_slot].pkt_len = rlen;
             dnsCache[c_slot].active = true;
           }
-          
+
           dnsServer.beginPacket(cip, cport);
           dnsServer.write(buf, rlen);
           dnsServer.endPacket();
@@ -650,7 +731,8 @@ static void handleDns() {
       } else {
         forwardUpstreamAsync(qlen, cip, cport, dhash, qtype);
         totalAllowed++;
-        if (c) c->allowed++;
+        if (c)
+          c->allowed++;
       }
     }
   }
@@ -1084,6 +1166,7 @@ static void handleBenchmarkAll() {
 static void reopenBlocklist() {
   blocklist = LittleFS.open(BLOCKLIST_PATH, "r");
   numHashes = blocklist ? blocklist.size() / HASH_BYTES : 0;
+  buildSparseIndex();
 }
 static void beginBlocklistSwap() {
   if (blocklist)
@@ -1142,7 +1225,7 @@ static String checkFirmwareUpdate() {
     verUrl += "/";
 
   int remoteVer = -1;
-  
+
   // Create a strict scope for the version check so RAM is freed!
   {
     WiFiClientSecure client;
@@ -1155,18 +1238,19 @@ static String checkFirmwareUpdate() {
       }
       http.end();
     }
-  } // `client` is destroyed here, freeing ~40KB of heap for the actual OTA update!
+  } // `client` is destroyed here, freeing ~40KB of heap for the actual OTA
+    // update!
 
   if (remoteVer > FW_VERSION) {
     Serial.printf("[OTA] New version %d found! Updating...\n", remoteVer);
-    
+
     WiFiClientSecure otaClient;
     otaClient.setInsecure();
-    
+
     httpUpdate.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
     t_httpUpdate_return ret =
         httpUpdate.update(otaClient, verUrl + "firmware.bin");
-        
+
     if (ret == HTTP_UPDATE_FAILED) {
       Serial.printf("HTTP_UPDATE_FAILED Error (%d): %s\n",
                     httpUpdate.getLastError(),
@@ -1381,9 +1465,8 @@ void setup() {
   Serial.println("\n[c3-adblock] booting");
   if (!LittleFS.begin(true))
     Serial.println("LittleFS FAILED");
-  blocklist = LittleFS.open(BLOCKLIST_PATH, "r");
+  reopenBlocklist();
   if (blocklist) {
-    numHashes = blocklist.size() / HASH_BYTES;
     Serial.printf("blocklist: %u domains\n", numHashes);
   }
 
