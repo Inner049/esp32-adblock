@@ -21,7 +21,7 @@
 #include <time.h>
 
 // ---- remote management defaults ----
-#define FW_VERSION 110
+#define FW_VERSION 111
 #define DEFAULT_FIREBASE_URL                                                   \
   "https://esp-adblock-default-rtdb.europe-west1.firebasedatabase.app/"
 #define FIREBASE_SECRET "gXBgqzEGZEvLC1ARnoMKxCHpEQoPVAx5cPXg9PUy"
@@ -1346,14 +1346,21 @@ void loop() {
   web.handleClient();
   handleDns();
 
+  static uint32_t lastReconnectAttempt = 0;
   if (WiFi.status() != WL_CONNECTED) {
     static uint32_t lb3 = 0;
     if (millis() - lb3 > 200) {
       lb3 = millis();
       digitalWrite(LED_PIN, !digitalRead(LED_PIN));
     }
+    if (millis() - lastReconnectAttempt > 10000) {
+      lastReconnectAttempt = millis();
+      WiFi.disconnect();
+      WiFi.begin(cfgSSID.c_str(), cfgPass.c_str());
+    }
   } else {
     digitalWrite(LED_PIN, LOW);
+    lastReconnectAttempt = millis();
   }
 
   time_t nowTime;
