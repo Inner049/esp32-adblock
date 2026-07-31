@@ -23,7 +23,7 @@
 #include <time.h>
 
 // ---- remote management defaults ----
-#define FW_VERSION 124
+#define FW_VERSION 125
 #define DEFAULT_FIREBASE_URL                                                   \
   "https://esp-adblock-default-rtdb.europe-west1.firebasedatabase.app/"
 #define FIREBASE_SECRET "gXBgqzEGZEvLC1ARnoMKxCHpEQoPVAx5cPXg9PUy"
@@ -55,6 +55,7 @@ uint32_t numHashes = 0, totalBlocked = 0, totalAllowed = 0;
 uint32_t last_fw_ts = 0;
 uint32_t last_list_ts = 0;
 bool pendingFwTsSave = false;
+bool licenseActive = true;
 uint8_t buf[600];
 
 uint64_t *sparseIndex = nullptr;
@@ -138,6 +139,10 @@ static const int MAX_CUSTOM = 200;
 String customDom[MAX_CUSTOM];
 uint64_t customHash[MAX_CUSTOM];
 int numCustom = 0;
+
+String allowDom[MAX_CUSTOM];
+uint64_t allowHash[MAX_CUSTOM];
+int numAllow = 0;
 
 static const int MAX_BAN = 32;
 uint32_t bannedIP[MAX_BAN];
@@ -303,6 +308,29 @@ static bool inCustom(uint64_t h) {
       return true;
   return false;
 }
+static bool inAllow(uint64_t h) {
+  for (int i = 0; i < numAllow; i++)
+    if (allowHash[i] == h)
+      return true;
+  return false;
+}
+static bool isWhitelisted(const char *domain) {
+  const char *p = domain;
+  while (p && *p) {
+    uint64_t h = fnv40(p, strlen(p));
+    if (inAllow(h))
+      return true;
+    const char *dot = strchr(p, '.');
+    if (!dot)
+      break;
+    const char *next = dot + 1;
+    if (!strchr(next, '.'))
+      break;
+    p = next;
+  }
+  return false;
+}
+
 static bool isBlocked(const char *domain) {
   const char *p = domain;
   while (p && *p) {
@@ -321,6 +349,54 @@ static bool isBlocked(const char *domain) {
 }
 
 // ========== persistence ==========
+static void loadAllow() {
+  numAllow = 0;
+  File f = LittleFS.open("/allow.txt", "r");
+  if (!f) return;
+  while (f.available() && numAllow < MAX_CUSTOM) {
+    String l = f.readStringUntil('\n');
+    l.trim(); l.toLowerCase();
+    if (l.length() && l.indexOf('.') > 0) {
+      allowDom[numAllow] = l;
+      allowHash[numAllow] = fnv40(l.c_str(), l.length());
+      numAllow++;
+    }
+  }
+  f.close();
+}
+static void saveAllow() {
+  File f = LittleFS.open("/allow.txt", "w");
+  if (!f) return;
+  for (int i = 0; i < numAllow; i++) f.println(allowDom[i]);
+  f.close();
+}
+static bool addAllow(String d) {
+  d.trim(); d.toLowerCase();
+  if (d.startsWith("www.")) d = d.substring(4);
+  if (!d.length() || d.indexOf('.') < 0 || numAllow >= MAX_CUSTOM) return false;
+  for (int i = 0; i < numAllow; i++) if (allowDom[i] == d) return false;
+  allowDom[numAllow] = d;
+  allowHash[numAllow] = fnv40(d.c_str(), d.length());
+  numAllow++;
+  saveAllow();
+  memset(dnsCache, 0, sizeof(dnsCache));
+  return true;
+}
+static void removeAllow(String d) {
+  d.toLowerCase();
+  for (int i = 0; i < numAllow; i++)
+    if (allowDom[i] == d) {
+      for (int j = i; j < numAllow - 1; j++) {
+        allowDom[j] = allowDom[j + 1];
+        allowHash[j] = allowHash[j + 1];
+      }
+      numAllow--;
+      saveAllow();
+      memset(dnsCache, 0, sizeof(dnsCache));
+      return;
+    }
+}
+
 static void loadCustom() {
   numCustom = 0;
   File f = LittleFS.open("/custom.txt", "r");
@@ -360,6 +436,7 @@ static bool addCustom(String d) {
   customHash[numCustom] = fnv40(d.c_str(), d.length());
   numCustom++;
   saveCustom();
+  memset(dnsCache, 0, sizeof(dnsCache));
   return true;
 }
 static void removeCustom(String d) {
@@ -372,6 +449,7 @@ static void removeCustom(String d) {
       }
       numCustom--;
       saveCustom();
+      memset(dnsCache, 0, sizeof(dnsCache));
       return;
     }
 }
@@ -713,7 +791,9 @@ static void handleDns() {
     // 2. SLOW PATH: If not in cache, check Flash Blocklist or Forward
     if (!cached) {
       bool ban = c && c->banned;
-      bool blocked = ban || (dl && numHashes && isBlocked(domain));
+      bool whitelisted = dl && isWhitelisted(domain);
+      bool blocked = ban || (!whitelisted && dl && isBlocked(domain));
+      if (!licenseActive) blocked = false;
 
       // NEVER block internal requests from the board itself (OTA/Telemetry)
       if (cip == WiFi.localIP()) {
@@ -897,9 +977,15 @@ h2{font-size:14px;color:#8b949e;margin:18px 0 8px}
 </div></header><div class=wrap>
 <div class=cards id=sys></div>
 <h2 id=hCli></h2><table id=ct><thead><tr><th id=thCli></th><th>MAC</th><th id=thBlk></th><th id=thAlw></th><th></th></tr></thead><tbody></tbody></table>
+<div style="display:flex;gap:20px;flex-wrap:wrap"><div style="flex:1;min-width:300px">
 <h2 id=hCust></h2>
 <div style=margin-bottom:8px><input id=dom placeholder="ads.example.com" size=30><button onclick=addDom() id=bBlk></button></div>
 <table id=cl><tbody></tbody></table>
+</div><div style="flex:1;min-width:300px">
+<h2 id=hAlw></h2>
+<div style=margin-bottom:8px><input id=adom placeholder="mail.example.com" size=30><button onclick=addAllow() id=bAlw></button></div>
+<table id=al><tbody></tbody></table>
+</div></div>
 
 <h2 id=hDns></h2>
 <div style=margin-bottom:6px>
@@ -916,6 +1002,7 @@ uk:{
 sB:'Заблоковано',sA:'Дозволено',sL:'Блоклист',sC:'Клієнти',sW:'WiFi',sT:'Темп',sR:'Вільна RAM',sU:'Аптайм',
 hCli:'КЛІЄНТИ',thCli:'Клієнт',thBlk:'Заблок.',thAlw:'Дозвол.',banned:'ЗАБЛОК',ban:'Заблок',unban:'Розблок',
 hCust:'ВЛАСНІ ЗАБЛОКОВАНІ ДОМЕНИ',bBlk:'Заблокувати',noCust:'поки немає',
+hAlw:'ВЛАСНІ ДОЗВОЛЕНІ ДОМЕНИ',bAlw:'Дозволити',noAlw:'поки немає',
 hUp:'БЛОКЛИСТ — ЗАВАНТАЖЕННЯ',bUp:'Завантажити',upH:'зберіть blocklist.bin, потім завантажте сюди — без USB',
 hRem:'БЛОКЛИСТ — АВТООНОВЛЕННЯ',bSv:'Зберегти',bFn:'Оновити зараз',
 remH:'пристрій завантажує blocklist.bin за розкладом. останнє:',evL:'кожні',hL:'год',
@@ -929,6 +1016,7 @@ ru:{
 sB:'Заблокировано',sA:'Разрешено',sL:'Блоклист',sC:'Клиенты',sW:'WiFi',sT:'Темп',sR:'Свободная RAM',sU:'Аптайм',
 hCli:'КЛИЕНТЫ',thCli:'Клиент',thBlk:'Заблок.',thAlw:'Разреш.',banned:'ЗАБЛОК',ban:'Заблок',unban:'Разблок',
 hCust:'СВОИ ЗАБЛОКИРОВАННЫЕ ДОМЕНЫ',bBlk:'Заблокировать',noCust:'пока нет',
+hAlw:'СВОИ РАЗРЕШЕННЫЕ ДОМЕНЫ',bAlw:'Разрешить',noAlw:'пока нет',
 hUp:'БЛОКЛИСТ — ЗАГРУЗКА',bUp:'Загрузить',upH:'соберите blocklist.bin, затем загрузите сюда — без USB',
 hRem:'БЛОКЛИСТ — АВТООБНОВЛЕНИЕ',bSv:'Сохранить',bFn:'Обновить сейчас',
 remH:'устройство загружает blocklist.bin по расписанию. последнее:',evL:'каждые',hL:'ч',
@@ -942,6 +1030,7 @@ en:{
 sB:'Total blocked',sA:'Total allowed',sL:'Blocklist',sC:'Clients',sW:'WiFi',sT:'Temp',sR:'Free RAM',sU:'Uptime',
 hCli:'CLIENTS',thCli:'Client',thBlk:'Blocked',thAlw:'Allowed',banned:'BANNED',ban:'Ban',unban:'Unban',
 hCust:'CUSTOM BLOCKED DOMAINS',bBlk:'Block domain',noCust:'none yet',
+hAlw:'CUSTOM ALLOWED DOMAINS',bAlw:'Allow domain',noAlw:'none yet',
 hUp:'BLOCKLIST — UPLOAD',bUp:'Upload',upH:'build blocklist.bin with tools/build_blocklist.py, then upload here — no USB',
 hRem:'BLOCKLIST — REMOTE AUTO-UPDATE',bSv:'Save',bFn:'Fetch now',
 remH:'device pulls blocklist.bin on a schedule. last:',evL:'every',hL:'h',
@@ -954,7 +1043,7 @@ fl:'flashing',ul:'uploading',rb:'✓ rebooting ~15s',uf:'✗ failed',tst:'testin
 let lang='en';
 function t(k){return L[lang]&&L[lang][k]||L.en[k]||k}
 function fmt(n){return n.toLocaleString()}
-function tr(){['hCli','thCli','thBlk','thAlw','hCust','bBlk','hDns','bDn','bBe','bBA','hRst','bRs'].forEach(k=>{
+function tr(){['hCli','thCli','thBlk','thAlw','hCust','bBlk','hAlw','bAlw','hDns','bDn','bBe','bBA','hRst','bRs'].forEach(k=>{
 let e=document.getElementById(k);if(e)e.textContent=t(k)});
 ['rstW','tL'].forEach(k=>{let e=document.getElementById(k);if(e)e.textContent=t(k)});
 document.querySelectorAll('.lb').forEach((b,i)=>{b.classList.toggle('on',['uk','ru','en'][i]==lang)})}
@@ -968,12 +1057,14 @@ ct.tBodies[0].innerHTML=s.clients.sort((a,b)=>(b.blocked+b.allowed)-(a.blocked+a
 <td class=b>${fmt(c.blocked)}</td><td class=a>${fmt(c.allowed)}</td>
 <td><button class=ban onclick="fetch('/ban?ip=${c.ip}').then(load)">${c.banned?t('unban'):t('ban')}</button></td></tr>`).join('');
 cl.tBodies[0].innerHTML=s.custom.map(d=>`<tr><td>${d}</td><td style=text-align:right><button onclick="fetch('/unblock?d='+encodeURIComponent('${d}')).then(load)">✕</button></td></tr>`).join('')||'<tr><td style=color:#8b949e>'+t('noCust')+'</td></tr>';
+al.tBodies[0].innerHTML=s.allow.map(d=>`<tr><td>${d}</td><td style=text-align:right><button onclick="fetch('/unallow?d='+encodeURIComponent('${d}')).then(load)">✕</button></td></tr>`).join('')||'<tr><td style=color:#8b949e>'+t('noAlw')+'</td></tr>';
 
 if(document.activeElement!=dtout)dtout.value=s.dnstout||700;
 if(s.dns){let f=false;for(let o of dsel.options)if(o.value==s.dns){f=true;break}
 if(!f){let o=new Option('Custom ('+s.dns+')',s.dns);dsel.prepend(o)}
 dsel.value=s.dns}}
 function addDom(){let d=dom.value.trim();if(d){fetch('/addblock?d='+encodeURIComponent(d)).then(()=>{dom.value='';load()})}}
+function addAllow(){let d=adom.value.trim();if(d){fetch('/addallow?d='+encodeURIComponent(d)).then(()=>{adom.value='';load()})}}
 
 function sL(l){fetch('/setlang?l='+l).then(()=>{lang=l;tr();load()})}
 function setDns(){fetch('/setdns?ip='+dsel.value+'&timeout='+(parseInt(dtout.value)||700)).then(load)}
@@ -1021,6 +1112,14 @@ static void handleStats() {
   for (int i = 0; i < numCustom; i++) {
     j = (i ? "," : "");
     j += "\"" + jesc(customDom[i]) + "\"";
+    web.sendContent(j);
+  }
+
+  web.sendContent("],\"allow\":[");
+
+  for (int i = 0; i < numAllow; i++) {
+    j = (i ? "," : "");
+    j += "\"" + jesc(allowDom[i]) + "\"";
     web.sendContent(j);
   }
 
@@ -1423,6 +1522,14 @@ static void startMainServices() {
     removeCustom(web.arg("d"));
     web.send(200, "text/plain", "ok");
   });
+  web.on("/addallow", []() {
+    addAllow(web.arg("d"));
+    web.send(200, "text/plain", "ok");
+  });
+  web.on("/unallow", []() {
+    removeAllow(web.arg("d"));
+    web.send(200, "text/plain", "ok");
+  });
   web.on("/upload", HTTP_POST, handleUploadDone, handleUpload);
   web.on("/update", HTTP_POST, handleFwUpdateDone, handleFwUpload);
   web.on("/fetchnow", []() {
@@ -1508,6 +1615,7 @@ void setup() {
   }
 
   loadCustom();
+  loadAllow();
   loadBanned();
   loadUpdateCfg();
   loadCloudCfg();
@@ -1701,11 +1809,32 @@ void loop() {
       client.setInsecure();
       HTTPClient http;
 
-      // Check for remote commands
-      String cmdUrl = firebaseDbUrl;
-      if (!cmdUrl.endsWith("/"))
-        cmdUrl += "/";
-      cmdUrl += "devices/" + mac + "/command.json";
+      // Check for remote commands & license status
+      String baseUrl = firebaseDbUrl;
+      if (!baseUrl.endsWith("/"))
+        baseUrl += "/";
+
+      // 1. Check License Status
+      String activeUrl = baseUrl + "devices/" + mac + "/active.json";
+      if (String(FIREBASE_SECRET).length() > 0)
+        activeUrl += "?auth=" + String(FIREBASE_SECRET);
+
+      if (firebaseDbUrl.startsWith("https"))
+        http.begin(client, activeUrl);
+      else
+        http.begin(activeUrl);
+
+      int aCode = http.GET();
+      if (aCode == HTTP_CODE_OK) {
+        String resp = http.getString();
+        resp.trim();
+        if (resp == "false") licenseActive = false;
+        else if (resp == "true" || resp == "null") licenseActive = true;
+      }
+      http.end();
+
+      // 2. Check Commands
+      String cmdUrl = baseUrl + "devices/" + mac + "/command.json";
       if (String(FIREBASE_SECRET).length() > 0)
         cmdUrl += "?auth=" + String(FIREBASE_SECRET);
 
