@@ -238,7 +238,7 @@
                     const sortedLogs = Object.values(dev.logs).sort((a,b) => b.ts - a.ts);
                     logsHtml = sortedLogs.map(l => `
                         <div class="log-entry">
-                            <span style="color:#8b949e">${new Date(l.ts).toLocaleTimeString()}</span>: ${l.msg}
+                            <span style="color:#8b949e">${new Date(l.ts).toLocaleString()}</span>: ${l.msg}
                         </div>
                     `).join('');
                 } else {
