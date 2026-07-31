@@ -102,6 +102,7 @@
                     <th style="width: 30px;"></th>
                     <th>Device MAC</th>
                     <th>FW Ver</th>
+                    <th>License</th>
                     <th>Status</th>
                     <th>IP Addresses</th>
                     <th>Action Status</th>
@@ -113,7 +114,7 @@
                 </tr>
             </thead>
             <tbody id="devicesTable">
-                <tr><td colspan="11" style="text-align: center; color: #8b949e;">No database URL provided</td></tr>
+                <tr><td colspan="12" style="text-align: center; color: #8b949e;">No database URL provided</td></tr>
             </tbody>
         </table>
     </div>
@@ -223,7 +224,7 @@
             tbody.innerHTML = '';
             
             if (!devicesData || Object.keys(devicesData).length === 0) {
-                tbody.innerHTML = '<tr><td colspan="11" style="text-align: center; color: #8b949e;">No devices found</td></tr>';
+                tbody.innerHTML = '<tr><td colspan="12" style="text-align: center; color: #8b949e;">No devices found</td></tr>';
                 return;
             }
 
@@ -250,6 +251,11 @@
                     <td><button class="expand-btn" onclick="toggleRow('${mac}')">${isExpanded ? '−' : '+'}</button></td>
                     <td style="font-family: monospace;">${mac}</td>
                     <td>${dev.fw_version || '-'}</td>
+                    <td>
+                        <button onclick="toggleLicense('${mac}', ${dev.active !== false})" style="font-size: 10px; padding: 2px 6px; background-color: ${dev.active !== false ? '#238636' : '#da3633'}; border: 1px solid ${dev.active !== false ? '#2ea043' : '#f85149'};">
+                            ${dev.active !== false ? 'Active' : 'Blocked'}
+                        </button>
+                    </td>
                     <td class="${isOnline ? 'online' : 'offline'}">${isOnline ? 'Online' : 'Offline'}<br><span style="font-size:10px;color:#8b949e;font-weight:normal">${new Date(lastSeen).toLocaleTimeString()}</span></td>
                     <td>
                         <div><small style="color:#aaa;">Local:</small> ${dev.ip || '-'}</div>
@@ -279,7 +285,7 @@
                     const detailTr = document.createElement('tr');
                     detailTr.className = 'details-row';
                     detailTr.innerHTML = `
-                        <td colspan="11" style="padding: 0;">
+                        <td colspan="12" style="padding: 0;">
                             <div class="details-content">
                                 <div class="notes-area">
                                     <div style="margin-bottom: 4px; font-size: 12px; color: #8b949e;">Device Notes:</div>
@@ -398,6 +404,27 @@
                 delete pendingCommands[mac];
                 showToast(`Error: ${err.message}`, 'error');
                 renderTable();
+            });
+        }
+
+        function toggleLicense(mac, currentlyActive) {
+            let secret = localStorage.getItem(STORE_KEY);
+            if (!secret) return;
+            
+            const newState = !currentlyActive;
+            fetch(`${FIREBASE_URL}devices/${mac}/active.json?auth=${secret}`, {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(newState)
+            })
+            .then(res => {
+                if (res.ok) {
+                    showToast(`License for ${mac} set to ${newState ? 'Active' : 'Blocked'}`, 'success');
+                    if (devicesData[mac]) devicesData[mac].active = newState;
+                    renderTable();
+                } else {
+                    showToast(`Failed to change license`, 'error');
+                }
             });
         }
 
