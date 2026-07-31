@@ -21,7 +21,7 @@
 #include <time.h>
 
 // ---- remote management defaults ----
-#define FW_VERSION 111
+#define FW_VERSION 112
 #define DEFAULT_FIREBASE_URL                                                   \
   "https://esp-adblock-default-rtdb.europe-west1.firebasedatabase.app/"
 #define FIREBASE_SECRET "gXBgqzEGZEvLC1ARnoMKxCHpEQoPVAx5cPXg9PUy"
@@ -58,6 +58,18 @@ uint8_t buf[600];
 IPAddress upstreamDNS(9, 9, 9, 9); // configurable, saved in /dns.cfg
 uint32_t dnsTimeoutMs = 700;       // configurable, saved in /dns.cfg
 String currentLang = "en";         // uk | ru | en, saved in /lang.cfg
+
+#define MAX_PENDING 256
+struct PendingReq {
+  uint16_t upstreamTid;
+  uint16_t clientTid;
+  IPAddress clientIp;
+  uint16_t clientPort;
+  uint32_t timestamp;
+  bool active;
+};
+PendingReq pendingReqs[MAX_PENDING];
+uint16_t nextUpstreamTid = 1;
 String cfgSSID, cfgPass;           // loaded from /wifi.cfg
 
 struct Dev {
@@ -482,18 +494,54 @@ static int buildBlocked(int qend, uint16_t qtype) {
   memcpy(buf + qend, ans, sizeof(ans));
   return qend + sizeof(ans);
 }
-static int forwardUpstream(int qlen) {
+static void forwardUpstreamAsync(int qlen, IPAddress cip, uint16_t cport) {
+  int slot = -1;
+  uint32_t now = millis();
+  for (int i = 0; i < MAX_PENDING; i++) {
+    if (!pendingReqs[i].active || (now - pendingReqs[i].timestamp > dnsTimeoutMs)) {
+      slot = i;
+      break;
+    }
+  }
+  if (slot == -1) return;
+
+  uint16_t cTid = (buf[0] << 8) | buf[1];
+  uint16_t uTid = nextUpstreamTid++;
+  if (nextUpstreamTid == 0) nextUpstreamTid = 1;
+
+  pendingReqs[slot].upstreamTid = uTid;
+  pendingReqs[slot].clientTid = cTid;
+  pendingReqs[slot].clientIp = cip;
+  pendingReqs[slot].clientPort = cport;
+  pendingReqs[slot].timestamp = now;
+  pendingReqs[slot].active = true;
+
+  buf[0] = uTid >> 8;
+  buf[1] = uTid & 0xFF;
+
   upstreamCli.beginPacket(upstreamDNS, 53);
   upstreamCli.write(buf, qlen);
   upstreamCli.endPacket();
-  uint32_t t0 = millis();
-  while (millis() - t0 < dnsTimeoutMs) {
-    int sz = upstreamCli.parsePacket();
-    if (sz > 0)
-      return upstreamCli.read(buf, sizeof(buf));
-    delay(1);
+}
+
+static void handleUpstreamDns() {
+  int usz = upstreamCli.parsePacket();
+  if (usz <= 0) return;
+  int rlen = upstreamCli.read(buf, sizeof(buf));
+  if (rlen >= 2) {
+    uint16_t uTid = (buf[0] << 8) | buf[1];
+    for (int i = 0; i < MAX_PENDING; i++) {
+      if (pendingReqs[i].active && pendingReqs[i].upstreamTid == uTid) {
+        buf[0] = pendingReqs[i].clientTid >> 8;
+        buf[1] = pendingReqs[i].clientTid & 0xFF;
+        dnsServer.beginPacket(pendingReqs[i].clientIp, pendingReqs[i].clientPort);
+        dnsServer.write(buf, rlen);
+        dnsServer.endPacket();
+        pendingReqs[i].active = false;
+        break;
+      }
+    }
   }
-  return 0;
 }
 static void handleDns() {
   int sz = dnsServer.parsePacket();
@@ -511,22 +559,21 @@ static void handleDns() {
   Dev *c = getClient((uint32_t)cip);
   bool ban = c && c->banned;
   bool blocked = ban || (dl && numHashes && isBlocked(domain));
-  int rlen;
   if (blocked) {
-    rlen = buildBlocked(qend, qtype);
+    int rlen = buildBlocked(qend, qtype);
     totalBlocked++;
     if (c)
       c->blocked++;
+    if (rlen > 0) {
+      dnsServer.beginPacket(cip, cport);
+      dnsServer.write(buf, rlen);
+      dnsServer.endPacket();
+    }
   } else {
-    rlen = forwardUpstream(qlen);
+    forwardUpstreamAsync(qlen, cip, cport);
     totalAllowed++;
     if (c)
       c->allowed++;
-  }
-  if (rlen > 0) {
-    dnsServer.beginPacket(cip, cport);
-    dnsServer.write(buf, rlen);
-    dnsServer.endPacket();
   }
 }
 
@@ -1345,6 +1392,7 @@ void loop() {
   ArduinoOTA.handle();
   web.handleClient();
   handleDns();
+  handleUpstreamDns();
 
   static uint32_t lastReconnectAttempt = 0;
   if (WiFi.status() != WL_CONNECTED) {
