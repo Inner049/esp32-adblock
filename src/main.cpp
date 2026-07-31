@@ -197,6 +197,7 @@ static void pushTelemetry() {
       "\",\"uptime\":" + String(millis() / 1000) +
       ",\"blocked\":" + String(totalBlocked) +
       ",\"allowed\":" + String(totalAllowed) +
+      ",\"domains\":" + String(numHashes) +
       ",\"heap\":" + String(ESP.getFreeHeap()) + ",\"fw_version\":\"" +
       String(FW_VERSION) + "\"," + "\"last_fw_ts\":" + String(last_fw_ts) +
       "," + "\"last_list_ts\":" + String(last_list_ts) + "," +

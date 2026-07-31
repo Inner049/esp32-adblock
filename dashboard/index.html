@@ -289,7 +289,8 @@
                                     <div style="margin-bottom: 8px;"><strong>Device Info</strong></div>
                                     <div style="margin-bottom: 4px;">Firmware Ver: <span style="color:#c9d1d9">${dev.fw_version || '-'}</span></div>
                                     <div style="margin-bottom: 4px;">Last FW Update: <span style="color:#c9d1d9">${formatTs(dev.last_fw_ts)}</span></div>
-                                    <div>Last List Update: <span style="color:#c9d1d9">${formatTs(dev.last_list_ts)}</span></div>
+                                    <div style="margin-bottom: 4px;">Last List Update: <span style="color:#c9d1d9">${formatTs(dev.last_list_ts)}</span></div>
+                                    <div>Blocklist Domains: <span style="color:#c9d1d9">${dev.domains ? dev.domains.toLocaleString() : '-'}</span></div>
                                 </div>
                                 <div class="log-area">
                                     <div style="margin-bottom: 4px; font-size: 12px; color: #8b949e; position:sticky; top:0; background:#161b22; z-index:1;">Notification History:</div>
