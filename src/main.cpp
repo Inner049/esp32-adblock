@@ -57,6 +57,7 @@ uint32_t last_list_ts = 0;
 bool pendingFwTsSave = false;
 bool licenseActive = true;
 uint8_t buf[1200];
+SemaphoreHandle_t blocklistMutex;
 
 static void sendUdpPacket(WiFiUDP &udp) {
   int retries = 5;
@@ -363,11 +364,14 @@ static bool isWhitelisted(const char *domain) {
 }
 
 static bool isBlocked(const char *domain) {
+  xSemaphoreTake(blocklistMutex, portMAX_DELAY);
   const char *p = domain;
   while (p && *p) {
     uint64_t h = fnv40(p, strlen(p));
-    if (inFlash(h) || inCustom(h))
+    if (inFlash(h) || inCustom(h)) {
+      xSemaphoreGive(blocklistMutex);
       return true;
+    }
     const char *dot = strchr(p, '.');
     if (!dot)
       break;
@@ -376,6 +380,7 @@ static bool isBlocked(const char *domain) {
       break;
     p = next;
   }
+  xSemaphoreGive(blocklistMutex);
   return false;
 }
 
@@ -690,36 +695,32 @@ static size_t parseQuery(const uint8_t *pkt, int len, char *out,
 }
 static int buildBlocked(int qend, uint16_t qtype) {
   buf[2] = 0x81;
-  buf[3] = 0x80;
+  buf[3] = 0x83; // NXDOMAIN (fixes timeouts for AAAA/HTTPS queries)
   buf[6] = 0;
-  buf[7] = (qtype == 1) ? 1 : 0;
+  buf[7] = 0;
   buf[8] = 0;
   buf[9] = 0;
   buf[10] = 0;
   buf[11] = 0;
-  if (qtype != 1)
-    return qend;
-  const uint8_t ans[] = {0xC0, 0x0C, 0, 1, 0, 1, 0, 0,
-                         1,    0x2C, 0, 4, 0, 0, 0, 0};
-  memcpy(buf + qend, ans, sizeof(ans));
-  return qend + sizeof(ans);
+  return qend;
 }
 static void forwardUpstreamAsync(int qlen, IPAddress cip, uint16_t cport,
                                  uint64_t dhash, uint16_t qtype) {
   static int last_slot = 0;
   int slot = -1;
+  int active_count = 0;
   uint32_t now = millis();
   for (int i = 0; i < MAX_PENDING; i++) {
+    if (pendingReqs[i].active) active_count++;
     int idx = (last_slot + i) % MAX_PENDING;
-    if (!pendingReqs[idx].active ||
-        (now - pendingReqs[idx].timestamp > dnsTimeoutMs)) {
+    if (slot == -1 && (!pendingReqs[idx].active ||
+        (now - pendingReqs[idx].timestamp > dnsTimeoutMs))) {
       slot = idx;
       last_slot = (idx + 1) % MAX_PENDING;
-      break;
     }
   }
   if (slot == -1) {
-    Serial.printf("[DNS] ERROR: Queue FULL! Dropped forward for dhash %llu\n", dhash);
+    Serial.printf("[DNS] ERROR: Queue FULL! (depth: %d/%d) Dropped forward for dhash %llu\n", active_count, MAX_PENDING, dhash);
     return;
   }
 
@@ -743,7 +744,7 @@ static void forwardUpstreamAsync(int qlen, IPAddress cip, uint16_t cport,
   upstreamCli.beginPacket(upstreamDNS, 53);
   upstreamCli.write(buf, qlen);
   sendUdpPacket(upstreamCli);
-  Serial.printf("[DNS] -> Forwarded dhash %llu (type %d) to upstream (uTid: %d, slot: %d, len: %d)\n", dhash, qtype, uTid, slot, qlen);
+  Serial.printf("[DNS] -> Forwarded dhash %llu (type %d) to upstream (uTid: %d, slot: %d, q_depth: %d/%d)\n", dhash, qtype, uTid, slot, active_count + 1, MAX_PENDING);
 }
 
 static void handleUpstreamDns() {
@@ -756,7 +757,8 @@ static void handleUpstreamDns() {
       for (int i = 0; i < MAX_PENDING; i++) {
         if (pendingReqs[i].active && pendingReqs[i].upstreamTid == uTid) {
           found = true;
-          Serial.printf("[DNS] <- Received upstream response (uTid: %d, rlen: %d) for slot %d\n", uTid, rlen, i);
+          uint32_t latency = millis() - pendingReqs[i].timestamp;
+          Serial.printf("[DNS] <- Received upstream response (uTid: %d, rlen: %d) for slot %d (Latency: %u ms)\n", uTid, rlen, i, latency);
 
           if (rlen <= 128 && pendingReqs[i].domain_hash != 0) {
             int c_slot = next_cache_slot++;
@@ -764,7 +766,7 @@ static void handleUpstreamDns() {
               next_cache_slot = 0;
             dnsCache[c_slot].hash = pendingReqs[i].domain_hash;
             dnsCache[c_slot].qtype = pendingReqs[i].qtype;
-            dnsCache[c_slot].expire_ts = millis() + 300000;
+            dnsCache[c_slot].expire_ts = millis() + 30000;
             memcpy(dnsCache[c_slot].pkt, buf, rlen);
             dnsCache[c_slot].pkt_len = rlen;
             dnsCache[c_slot].active = true;
@@ -799,6 +801,7 @@ static void handleDns() {
     char domain[256];
     uint16_t qtype = 0;
     int qend = qlen;
+    uint32_t start_m = micros();
     size_t dl = parseQuery(buf, qlen, domain, &qtype, &qend);
     Dev *c = getClient((uint32_t)cip);
 
@@ -829,7 +832,8 @@ static void handleDns() {
             sendUdpPacket(dnsServer);
             cached = true;
             if (dl > 0) logQuery(domain, (uint32_t)cip, 3);
-            Serial.printf("[DNS] -> CACHE HIT! Sent %d bytes back.\n", dnsCache[i].pkt_len);
+            uint32_t took = micros() - start_m;
+            Serial.printf("[DNS] -> CACHE HIT! Sent %d bytes back (Lookup took %u us).\n", dnsCache[i].pkt_len, took);
             break;
           }
         }
@@ -856,7 +860,8 @@ static void handleDns() {
         if (dl > 0) logQuery(domain, (uint32_t)cip, 1);
 
         if (rlen > 0) {
-          Serial.printf("[DNS] -> BLOCKED! Sent %d bytes back.\n", rlen);
+          uint32_t took = micros() - start_m;
+          Serial.printf("[DNS] -> BLOCKED! Sent %d bytes back (Lookup took %u us).\n", rlen, took);
           // Cache this blocked response to answer instantly next time!
           if (rlen <= 128 && dhash != 0) {
             int c_slot = next_cache_slot++;
@@ -1350,14 +1355,18 @@ static void handleBenchmarkAll() {
 
 // ========== blocklist swap ==========
 static void reopenBlocklist() {
+  xSemaphoreTake(blocklistMutex, portMAX_DELAY);
   blocklist = LittleFS.open(BLOCKLIST_PATH, "r");
   numHashes = blocklist ? blocklist.size() / HASH_BYTES : 0;
   buildSparseIndex();
+  xSemaphoreGive(blocklistMutex);
 }
 static void beginBlocklistSwap() {
+  xSemaphoreTake(blocklistMutex, portMAX_DELAY);
   if (blocklist)
     blocklist.close();
   numHashes = 0;
+  xSemaphoreGive(blocklistMutex);
   LittleFS.remove(BLOCKLIST_PATH);
   LittleFS.remove("/blocklist.new");
 }
@@ -1693,136 +1702,23 @@ static void startSetupMode() {
   Serial.println("Setup mode: DNS redirect + web :80");
 }
 
-void setup() {
-  Serial.begin(115200);
-  pinMode(LED_PIN, OUTPUT);
-  digitalWrite(LED_PIN, HIGH);
-  delay(300);
-  Serial.println("\n[c3-adblock] booting");
-  if (!LittleFS.begin(true))
-    Serial.println("LittleFS FAILED");
-  reopenBlocklist();
-  if (blocklist) {
-    Serial.printf("blocklist: %u domains\n", numHashes);
-  }
-
-  loadCustom();
-  loadAllow();
-  loadBanned();
-  loadUpdateCfg();
-  loadCloudCfg();
-  loadDnsCfg();
-  loadLangCfg();
-
-  prefs.begin("adblock", false);
-  int storedVer = prefs.getInt("fw_ver", 0);
-  if (storedVer != FW_VERSION) {
-    prefs.putInt("fw_ver", FW_VERSION);
-    pendingFwTsSave = true;
-  }
-  last_fw_ts = prefs.getUInt("last_fw_ts", 0);
-  last_list_ts = prefs.getUInt("last_list_ts", 0);
-
-  checkBootButton();
-
-  if (loadWifiCfg()) {
-    deviceMode = MODE_MAIN;
-    WiFi.mode(WIFI_STA);
-    WiFi.setAutoReconnect(true);
-    WiFi.begin(cfgSSID.c_str(), cfgPass.c_str());
-    uint32_t t0 = millis();
-    while (WiFi.status() != WL_CONNECTED && millis() - t0 < 10000) {
-      delay(300);
-      Serial.print(".");
-      digitalWrite(LED_PIN, !digitalRead(LED_PIN));
-    }
-    if (WiFi.status() == WL_CONNECTED) {
-      WiFi.setSleep(false);
-      esp_wifi_set_ps(WIFI_PS_NONE);
-      startMainServices();
-    }
-  } else {
-    deviceMode = MODE_SETUP;
-    startSetupMode();
+static void wifiEvent(WiFiEvent_t event, WiFiEventInfo_t info) {
+  if (event == ARDUINO_EVENT_WIFI_STA_DISCONNECTED) {
+    Serial.printf("[WIFI] Disconnected! Reason: %d\n", info.wifi_sta_disconnected.reason);
+  } else if (event == ARDUINO_EVENT_WIFI_STA_CONNECTED) {
+    Serial.println("[WIFI] Connected to AP");
+  } else if (event == ARDUINO_EVENT_WIFI_STA_GOT_IP) {
+    Serial.printf("[WIFI] Got IP: %s\n", IPAddress(info.got_ip.ip_info.ip.addr).toString().c_str());
   }
 }
 
-void loop() {
-  // Unconditionally check boot button (works in AP, STA, and Retry)
-  checkBootButton();
 
-  // Test triggers via Serial because host AP isolation might block HTTP
-  if (Serial.available()) {
-    String cmd = Serial.readStringUntil('\n');
-    cmd.trim();
-    if (cmd == "WEB_RESET_TEST") {
-      Serial.println("[TEST] Web Factory Reset Triggered via Serial");
-      handleFactoryReset();
-    } else if (cmd == "BOOT_RESET_TEST") {
-      Serial.println("[TEST] Boot Button 3s hold Triggered via Serial");
-      LittleFS.remove("/wifi.cfg");
-      LittleFS.remove("/dns.cfg");
-      LittleFS.remove("/lang.cfg");
-      ESP.restart();
+void sysTask(void *pvParameters) {
+  while (true) {
+    if (deviceMode != MODE_MAIN || WiFi.status() != WL_CONNECTED) {
+      vTaskDelay(pdMS_TO_TICKS(1000));
+      continue;
     }
-  }
-
-  if (deviceMode == MODE_SETUP) {
-    handleApDns();
-    web.handleClient();
-    static uint32_t lb = 0;
-    if (millis() - lb > 1000) {
-      lb = millis();
-      digitalWrite(LED_PIN, !digitalRead(LED_PIN));
-    }
-    yield();
-    return;
-  }
-
-  if (!servicesStarted) {
-    if (WiFi.status() == WL_CONNECTED) {
-      startMainServices();
-    } else {
-      static uint32_t lb2 = 0;
-      if (millis() - lb2 > 300) {
-        lb2 = millis();
-        digitalWrite(LED_PIN, !digitalRead(LED_PIN));
-      }
-      static uint32_t lr = 0;
-      if (lr == 0)
-        lr = millis();
-      if (millis() - lr > 10000) {
-        lr = millis();
-        WiFi.disconnect();
-        WiFi.begin(cfgSSID.c_str(), cfgPass.c_str());
-      }
-      delay(100);
-      return;
-    }
-  }
-
-  ArduinoOTA.handle();
-  web.handleClient();
-  handleDns();
-  handleUpstreamDns();
-
-  static uint32_t lastReconnectAttempt = 0;
-  if (WiFi.status() != WL_CONNECTED) {
-    static uint32_t lb3 = 0;
-    if (millis() - lb3 > 200) {
-      lb3 = millis();
-      digitalWrite(LED_PIN, !digitalRead(LED_PIN));
-    }
-    if (millis() - lastReconnectAttempt > 10000) {
-      lastReconnectAttempt = millis();
-      WiFi.disconnect();
-      WiFi.begin(cfgSSID.c_str(), cfgPass.c_str());
-    }
-  } else {
-    digitalWrite(LED_PIN, LOW);
-    lastReconnectAttempt = millis();
-  }
-
   time_t nowTime;
   time(&nowTime);
   struct tm timeinfo;
@@ -1980,6 +1876,156 @@ void loop() {
       }
       http.end();
     }
+  }
+
+
+    vTaskDelay(pdMS_TO_TICKS(100)); // Sleep 100ms
+  }
+}
+
+void setup() {
+  Serial.begin(115200);
+  pinMode(LED_PIN, OUTPUT);
+  digitalWrite(LED_PIN, HIGH);
+  delay(300);
+  Serial.println("\n[c3-adblock] booting");
+  if (!LittleFS.begin(true))
+    Serial.println("LittleFS FAILED");
+  blocklistMutex = xSemaphoreCreateMutex();
+  reopenBlocklist();
+  if (blocklist) {
+    Serial.printf("blocklist: %u domains\n", numHashes);
+  }
+
+  loadCustom();
+  loadAllow();
+  loadBanned();
+  loadUpdateCfg();
+  loadCloudCfg();
+  loadDnsCfg();
+  loadLangCfg();
+
+  prefs.begin("adblock", false);
+  int storedVer = prefs.getInt("fw_ver", 0);
+  if (storedVer != FW_VERSION) {
+    prefs.putInt("fw_ver", FW_VERSION);
+    pendingFwTsSave = true;
+  }
+  last_fw_ts = prefs.getUInt("last_fw_ts", 0);
+  last_list_ts = prefs.getUInt("last_list_ts", 0);
+
+  checkBootButton();
+
+  if (loadWifiCfg()) {
+    deviceMode = MODE_MAIN;
+    WiFi.mode(WIFI_STA);
+    WiFi.setAutoReconnect(true);
+    WiFi.onEvent(wifiEvent);
+    WiFi.begin(cfgSSID.c_str(), cfgPass.c_str());
+    uint32_t t0 = millis();
+    while (WiFi.status() != WL_CONNECTED && millis() - t0 < 10000) {
+      delay(300);
+      Serial.print(".");
+      digitalWrite(LED_PIN, !digitalRead(LED_PIN));
+    }
+    xTaskCreate(sysTask, "sysTask", 8192, NULL, 1, NULL);
+    
+    if (WiFi.status() == WL_CONNECTED) {
+      WiFi.setSleep(true);
+      esp_wifi_set_ps(WIFI_PS_MIN_MODEM);
+      startMainServices();
+    }
+  } else {
+    deviceMode = MODE_SETUP;
+    startSetupMode();
+  }
+}
+
+void loop() {
+  uint32_t nowMs = millis();
+  
+  static uint32_t last_stat_log = 0;
+  if (nowMs - last_stat_log > 10000) {
+    last_stat_log = nowMs;
+    float temp = temperatureRead();
+    Serial.printf("[SYS] Heap: %u, MaxAlloc: %u, RSSI: %d, Temp: %.1fC, Blocked: %u, Allowed: %u\n", ESP.getFreeHeap(), ESP.getMaxAllocHeap(), WiFi.RSSI(), temp, totalBlocked, totalAllowed);
+  }
+
+  // Unconditionally check boot button (works in AP, STA, and Retry)
+  checkBootButton();
+
+  // Test triggers via Serial because host AP isolation might block HTTP
+  if (Serial.available()) {
+    String cmd = Serial.readStringUntil('\n');
+    cmd.trim();
+    if (cmd == "WEB_RESET_TEST") {
+      Serial.println("[TEST] Web Factory Reset Triggered via Serial");
+      handleFactoryReset();
+    } else if (cmd == "BOOT_RESET_TEST") {
+      Serial.println("[TEST] Boot Button 3s hold Triggered via Serial");
+      LittleFS.remove("/wifi.cfg");
+      LittleFS.remove("/dns.cfg");
+      LittleFS.remove("/lang.cfg");
+      ESP.restart();
+    }
+  }
+
+  if (deviceMode == MODE_SETUP) {
+    handleApDns();
+    web.handleClient();
+    static uint32_t lb = 0;
+    if (millis() - lb > 1000) {
+      lb = millis();
+      digitalWrite(LED_PIN, !digitalRead(LED_PIN));
+    }
+    yield();
+    return;
+  }
+
+  if (!servicesStarted) {
+    if (WiFi.status() == WL_CONNECTED) {
+      WiFi.setSleep(true);
+      esp_wifi_set_ps(WIFI_PS_MIN_MODEM);
+      startMainServices();
+    } else {
+      static uint32_t lb2 = 0;
+      if (millis() - lb2 > 300) {
+        lb2 = millis();
+        digitalWrite(LED_PIN, !digitalRead(LED_PIN));
+      }
+      static uint32_t lr = 0;
+      if (lr == 0)
+        lr = millis();
+      if (millis() - lr > 10000) {
+        lr = millis();
+        WiFi.disconnect();
+        WiFi.begin(cfgSSID.c_str(), cfgPass.c_str());
+      }
+      delay(100);
+      return;
+    }
+  }
+
+  ArduinoOTA.handle();
+  web.handleClient();
+  handleDns();
+  handleUpstreamDns();
+
+  static uint32_t lastReconnectAttempt = 0;
+  if (WiFi.status() != WL_CONNECTED) {
+    static uint32_t lb3 = 0;
+    if (millis() - lb3 > 200) {
+      lb3 = millis();
+      digitalWrite(LED_PIN, !digitalRead(LED_PIN));
+    }
+    if (millis() - lastReconnectAttempt > 10000) {
+      lastReconnectAttempt = millis();
+      WiFi.disconnect();
+      WiFi.begin(cfgSSID.c_str(), cfgPass.c_str());
+    }
+  } else {
+    digitalWrite(LED_PIN, LOW);
+    lastReconnectAttempt = millis();
   }
 
   yield();

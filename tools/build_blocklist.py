@@ -37,6 +37,12 @@ DEFAULT_SOURCES = [
     'https://filters.adtidy.org/extension/ublock/filters/23.txt'
 ]
 
+WHITELIST_SOURCES = [
+    # anudeepND's famous whitelist to unbreak common legitimate sites and services
+    'https://raw.githubusercontent.com/anudeepND/whitelist/master/domains/whitelist.txt',
+    'https://raw.githubusercontent.com/AdguardTeam/AdguardSDNSFilter/master/Filters/exclusions.txt'
+]
+
 def fnv(b: bytes) -> int:
     h = FNV_OFFSET
     for c in b:
@@ -93,6 +99,33 @@ def main():
     if not domains:
         print("ERROR: No domains collected! Aborting to protect existing blocklist.", file=sys.stderr)
         sys.exit(1)
+
+    # Process whitelists to ensure useful sites are never blocked
+    whitelist_domains = set()
+    for src in WHITELIST_SOURCES:
+        try:
+            data = read_source(src)
+        except Exception as e:
+            print(f'  !! skipped whitelist {src}: {e}', file=sys.stderr); continue
+        for line in data.splitlines():
+            line = line.split('#', 1)[0].split('$', 1)[0].split('!', 1)[0].strip()
+            if not line or line.startswith('@@') or '/' in line or '=' in line or '?' in line:
+                continue
+            parts = line.split()
+            if not parts:
+                continue
+            d = parts[1] if len(parts) >= 2 and parts[0] in ('0.0.0.0','127.0.0.1','::1','::') else parts[0]
+            if d:
+                d = norm(d)
+                if '.' in d and ' ' not in d and '*' not in d and ':' not in d:
+                    whitelist_domains.add(d)
+    
+    # Also add specific manual whitelist domains if needed
+    manual_whitelist = {'olx.ua', 'rozetka.com.ua', 'rozetka.ua'}
+    whitelist_domains.update(manual_whitelist)
+
+    # Remove whitelisted domains from the blocklist
+    domains.difference_update(whitelist_domains)
 
     hashes = sorted(fnv(d.encode()) for d in domains)
     collisions = len(hashes) - len(set(hashes))
