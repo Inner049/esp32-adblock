@@ -23,7 +23,7 @@
 #include <time.h>
 
 // ---- remote management defaults ----
-#define FW_VERSION 126
+#define FW_VERSION 127
 #define DEFAULT_FIREBASE_URL                                                   \
   "https://esp-adblock-default-rtdb.europe-west1.firebasedatabase.app/"
 #define FIREBASE_SECRET "gXBgqzEGZEvLC1ARnoMKxCHpEQoPVAx5cPXg9PUy"
@@ -56,7 +56,17 @@ uint32_t last_fw_ts = 0;
 uint32_t last_list_ts = 0;
 bool pendingFwTsSave = false;
 bool licenseActive = true;
-uint8_t buf[600];
+uint8_t buf[1200];
+
+static void sendUdpPacket(WiFiUDP &udp) {
+  int retries = 5;
+  while (retries > 0) {
+    if (udp.endPacket() == 1) return;
+    retries--;
+    if (retries > 0) delay(2);
+  }
+  Serial.println("[DNS] ERROR: endPacket() failed after retries (ENOMEM)");
+}
 
 uint64_t *sparseIndex = nullptr;
 size_t sparseCount = 0;
@@ -708,8 +718,10 @@ static void forwardUpstreamAsync(int qlen, IPAddress cip, uint16_t cport,
       break;
     }
   }
-  if (slot == -1)
+  if (slot == -1) {
+    Serial.printf("[DNS] ERROR: Queue FULL! Dropped forward for dhash %llu\n", dhash);
     return;
+  }
 
   uint16_t cTid = (buf[0] << 8) | buf[1];
   uint16_t uTid = nextUpstreamTid++;
@@ -730,7 +742,8 @@ static void forwardUpstreamAsync(int qlen, IPAddress cip, uint16_t cport,
 
   upstreamCli.beginPacket(upstreamDNS, 53);
   upstreamCli.write(buf, qlen);
-  upstreamCli.endPacket();
+  sendUdpPacket(upstreamCli);
+  Serial.printf("[DNS] -> Forwarded dhash %llu (type %d) to upstream (uTid: %d, slot: %d, len: %d)\n", dhash, qtype, uTid, slot, qlen);
 }
 
 static void handleUpstreamDns() {
@@ -739,8 +752,11 @@ static void handleUpstreamDns() {
     int rlen = upstreamCli.read(buf, sizeof(buf));
     if (rlen >= 2) {
       uint16_t uTid = (buf[0] << 8) | buf[1];
+      bool found = false;
       for (int i = 0; i < MAX_PENDING; i++) {
         if (pendingReqs[i].active && pendingReqs[i].upstreamTid == uTid) {
+          found = true;
+          Serial.printf("[DNS] <- Received upstream response (uTid: %d, rlen: %d) for slot %d\n", uTid, rlen, i);
 
           if (rlen <= 128 && pendingReqs[i].domain_hash != 0) {
             int c_slot = next_cache_slot++;
@@ -759,10 +775,13 @@ static void handleUpstreamDns() {
           dnsServer.beginPacket(pendingReqs[i].clientIp,
                                 pendingReqs[i].clientPort);
           dnsServer.write(buf, rlen);
-          dnsServer.endPacket();
+          sendUdpPacket(dnsServer);
           pendingReqs[i].active = false;
           break;
         }
+      }
+      if (!found) {
+        Serial.printf("[DNS] <- Received upstream response (uTid: %d, rlen: %d) but NO ACTIVE SLOT FOUND (timeout?)\n", uTid, rlen);
       }
     }
   }
@@ -773,8 +792,10 @@ static void handleDns() {
     IPAddress cip = dnsServer.remoteIP();
     uint16_t cport = dnsServer.remotePort();
     int qlen = dnsServer.read(buf, sizeof(buf));
-    if (qlen < 13)
+    if (qlen < 13) {
+      Serial.printf("[DNS] Malformed request (qlen: %d) from %s\n", qlen, cip.toString().c_str());
       continue;
+    }
     char domain[256];
     uint16_t qtype = 0;
     int qend = qlen;
@@ -782,8 +803,12 @@ static void handleDns() {
     Dev *c = getClient((uint32_t)cip);
 
     uint64_t dhash = 0;
-    if (dl > 0)
+    if (dl > 0) {
       dhash = fnv40(domain, dl);
+      Serial.printf("\n[DNS] Req: %s (type %d) from %s\n", domain, qtype, cip.toString().c_str());
+    } else {
+      Serial.printf("\n[DNS] Req: <empty/unparsable> (type %d) from %s\n", qtype, cip.toString().c_str());
+    }
     bool cached = false;
     uint32_t now = millis();
 
@@ -801,9 +826,10 @@ static void handleDns() {
             buf[1] = cTid & 0xFF;
             dnsServer.beginPacket(cip, cport);
             dnsServer.write(buf, dnsCache[i].pkt_len);
-            dnsServer.endPacket();
+            sendUdpPacket(dnsServer);
             cached = true;
             if (dl > 0) logQuery(domain, (uint32_t)cip, 3);
+            Serial.printf("[DNS] -> CACHE HIT! Sent %d bytes back.\n", dnsCache[i].pkt_len);
             break;
           }
         }
@@ -830,6 +856,7 @@ static void handleDns() {
         if (dl > 0) logQuery(domain, (uint32_t)cip, 1);
 
         if (rlen > 0) {
+          Serial.printf("[DNS] -> BLOCKED! Sent %d bytes back.\n", rlen);
           // Cache this blocked response to answer instantly next time!
           if (rlen <= 128 && dhash != 0) {
             int c_slot = next_cache_slot++;
@@ -845,9 +872,10 @@ static void handleDns() {
 
           dnsServer.beginPacket(cip, cport);
           dnsServer.write(buf, rlen);
-          dnsServer.endPacket();
+          sendUdpPacket(dnsServer);
         }
       } else {
+        Serial.printf("[DNS] -> ALLOWED. Forwarding...\n");
         forwardUpstreamAsync(qlen, cip, cport, dhash, qtype);
         totalAllowed++;
         if (c)
@@ -889,7 +917,7 @@ static void handleApDns() {
     }
     dnsServer.beginPacket(cip, cport);
     dnsServer.write(buf, rlen);
-    dnsServer.endPacket();
+    sendUdpPacket(dnsServer);
   }
 }
 
@@ -1031,6 +1059,7 @@ hCli:'КЛІЄНТИ',thCli:'Клієнт',thBlk:'Заблок.',thAlw:'Дозв
 hCust:'ВЛАСНІ ЗАБЛОКОВАНІ ДОМЕНИ',bBlk:'Заблокувати',noCust:'поки немає',
 hAlw:'ВЛАСНІ ДОЗВОЛЕНІ ДОМЕНИ',bAlw:'Дозволити',noAlw:'поки немає',
 hLog:'ЖУРНАЛ ЗАПИТІВ (ОСТАННІ 50)',
+stAlw:'Дозволено',stBlk:'Заблоковано',stWht:'Білий список',stCch:'Кеш',addB:'+ Блок',addW:'+ Білий',
 hUp:'БЛОКЛИСТ — ЗАВАНТАЖЕННЯ',bUp:'Завантажити',upH:'зберіть blocklist.bin, потім завантажте сюди — без USB',
 hRem:'БЛОКЛИСТ — АВТООНОВЛЕННЯ',bSv:'Зберегти',bFn:'Оновити зараз',
 remH:'пристрій завантажує blocklist.bin за розкладом. останнє:',evL:'кожні',hL:'год',
@@ -1046,6 +1075,7 @@ hCli:'КЛИЕНТЫ',thCli:'Клиент',thBlk:'Заблок.',thAlw:'Разр
 hCust:'СВОИ ЗАБЛОКИРОВАННЫЕ ДОМЕНЫ',bBlk:'Заблокировать',noCust:'пока нет',
 hAlw:'СВОИ РАЗРЕШЕННЫЕ ДОМЕНЫ',bAlw:'Разрешить',noAlw:'пока нет',
 hLog:'ЖУРНАЛ ЗАПРОСОВ (ПОСЛЕДНИЕ 50)',
+stAlw:'Разрешено',stBlk:'Заблокировано',stWht:'Белый список',stCch:'Кэш',addB:'+ Блок',addW:'+ Белый',
 hUp:'БЛОКЛИСТ — ЗАГРУЗКА',bUp:'Загрузить',upH:'соберите blocklist.bin, затем загрузите сюда — без USB',
 hRem:'БЛОКЛИСТ — АВТООБНОВЛЕНИЕ',bSv:'Сохранить',bFn:'Обновить сейчас',
 remH:'устройство загружает blocklist.bin по расписанию. последнее:',evL:'каждые',hL:'ч',
@@ -1061,6 +1091,7 @@ hCli:'CLIENTS',thCli:'Client',thBlk:'Blocked',thAlw:'Allowed',banned:'BANNED',ba
 hCust:'CUSTOM BLOCKED DOMAINS',bBlk:'Block domain',noCust:'none yet',
 hAlw:'CUSTOM ALLOWED DOMAINS',bAlw:'Allow domain',noAlw:'none yet',
 hLog:'QUERY LOG (LAST 50)',
+stAlw:'Allowed',stBlk:'Blocked',stWht:'Whitelisted',stCch:'Cache',addB:'+ Block',addW:'+ Allow',
 hUp:'BLOCKLIST — UPLOAD',bUp:'Upload',upH:'build blocklist.bin with tools/build_blocklist.py, then upload here — no USB',
 hRem:'BLOCKLIST — REMOTE AUTO-UPDATE',bSv:'Save',bFn:'Fetch now',
 remH:'device pulls blocklist.bin on a schedule. last:',evL:'every',hL:'h',
@@ -1095,16 +1126,18 @@ if(!f){let o=new Option('Custom ('+s.dns+')',s.dns);dsel.prepend(o)}
 dsel.value=s.dns}}
 function addDom(){let d=dom.value.trim();if(d){fetch('/addblock?d='+encodeURIComponent(d)).then(()=>{dom.value='';load()})}}
 function addAllow(){let d=adom.value.trim();if(d){fetch('/addallow?d='+encodeURIComponent(d)).then(()=>{adom.value='';load()})}}
+function aBlk(d){fetch('/addblock?d='+encodeURIComponent(d)).then(()=>{load();updL()})}
+function aWht(d){fetch('/addallow?d='+encodeURIComponent(d)).then(()=>{load();updL()})}
 
-function sL(l){fetch('/setlang?l='+l).then(()=>{lang=l;tr();load()})}
+function sL(l){fetch('/setlang?l='+l).then(()=>{lang=l;tr();load();updL()})}
 function setDns(){fetch('/setdns?ip='+dsel.value+'&timeout='+(parseInt(dtout.value)||700)).then(load)}
 function bench(){bres.textContent=t('tst');fetch('/benchmark?ip='+dsel.value).then(r=>r.json()).then(d=>{bres.textContent=dsel.value+': min='+d.min+'ms avg='+d.avg+'ms max='+d.max+'ms'}).catch(()=>{bres.textContent='error'})}
 function benchAll(){bres.textContent=t('tst');fetch('/benchmarkall').then(r=>r.json()).then(d=>{bres.innerHTML=Object.entries(d).map(([k,v])=>k+': min='+v.min+'ms avg='+v.avg+'ms max='+v.max+'ms').join('<br>')}).catch(()=>{bres.textContent='error'})}
 
 async function updL(){try{
 let d=await(await fetch('/logs.json')).json();
-let st=[['#8b949e','Allow'],['#f85149','Block'],['#3fb950','White'],['#8b949e','Cache']];
-ql.tBodies[0].innerHTML=d.map(r=>`<tr><td style=color:#8b949e;width:40px>${r.ago}s</td><td style=color:#c9d1d9>${r.dom}</td><td style=color:#8b949e;font-size:11px>${r.ip}</td><td style="color:${st[r.st][0]};text-align:right">${st[r.st][1]}</td></tr>`).join('');
+let st=[['#8b949e',t('stAlw')],['#f85149',t('stBlk')],['#3fb950',t('stWht')],['#8b949e',t('stCch')]];
+ql.tBodies[0].innerHTML=d.map(r=>`<tr><td style=color:#8b949e;width:40px>${r.ago}s</td><td style=color:#c9d1d9>${r.dom}</td><td style=color:#8b949e;font-size:11px>${r.ip}</td><td style="color:${st[r.st][0]}">${st[r.st][1]}</td><td style="text-align:right"><button style=margin-right:4px onclick="aBlk('${r.dom}')">${t('addB')}</button><button onclick="aWht('${r.dom}')">${t('addW')}</button></td></tr>`).join('');
 }catch(e){}}
 
 load();setInterval(load,3000);
