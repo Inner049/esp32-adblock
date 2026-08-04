@@ -19,11 +19,12 @@
 #include <WiFiUdp.h>
 #include <esp_wifi.h>
 #include <lwip/dns.h>
+static String autoBenchmarkDns();
 #include <sntp.h>
 #include <time.h>
 
 // ---- remote management defaults ----
-#define FW_VERSION 128
+#define FW_VERSION 129
 #define DEFAULT_FIREBASE_URL                                                   \
   "https://esp-adblock-default-rtdb.europe-west1.firebasedatabase.app/"
 #define FIREBASE_SECRET "gXBgqzEGZEvLC1ARnoMKxCHpEQoPVAx5cPXg9PUy"
@@ -104,7 +105,18 @@ static void buildSparseIndex() {
                 (float)(sparseCount * 8) / 1024.0);
 }
 
-IPAddress upstreamDNS(9, 9, 9, 9); // configurable, saved in /dns.cfg
+#define MAX_DNS_SERVERS 10
+IPAddress dnsPool[MAX_DNS_SERVERS] = {
+    IPAddress(1, 1, 1, 1),
+    IPAddress(8, 8, 8, 8),
+    IPAddress(9, 9, 9, 9),
+    IPAddress(208, 67, 222, 222)
+};
+int numDnsServers = 4;
+IPAddress primaryDns(1, 1, 1, 1);
+IPAddress secondaryDns(8, 8, 8, 8);
+int dnsFailCount = 0;
+bool autoBenchEnabled = true;
 uint32_t dnsTimeoutMs = 700;       // configurable, saved in /dns.cfg
 String currentLang = "en";         // uk | ru | en, saved in /lang.cfg
 
@@ -550,29 +562,56 @@ static void saveWifiCfg(const String &ssid, const String &pass) {
 }
 static void loadDnsCfg() {
   File f = LittleFS.open("/dns.cfg", "r");
-  if (!f)
-    return;
+  if (!f) return;
+  bool loadedPool = false;
   while (f.available()) {
     String line = f.readStringUntil('\n');
     line.trim();
-    if (line.startsWith("upstream=")) {
-      String ip = line.substring(9);
-      ip.trim();
-      upstreamDNS.fromString(ip);
+    if (line.startsWith("pool=")) {
+      String ips = line.substring(5);
+      numDnsServers = 0;
+      int start = 0;
+      while (start < ips.length() && numDnsServers < MAX_DNS_SERVERS) {
+        int idx = ips.indexOf(',', start);
+        if (idx == -1) idx = ips.length();
+        IPAddress ip;
+        if (ip.fromString(ips.substring(start, idx))) {
+          dnsPool[numDnsServers++] = ip;
+        }
+        start = idx + 1;
+      }
+      if (numDnsServers > 0) loadedPool = true;
     } else if (line.startsWith("timeout=")) {
       uint32_t t = line.substring(8).toInt();
-      if (t >= 50 && t <= 5000)
-        dnsTimeoutMs = t;
+      if (t >= 50 && t <= 5000) dnsTimeoutMs = t;
+    } else if (line.startsWith("primary=")) {
+      primaryDns.fromString(line.substring(8));
+    } else if (line.startsWith("secondary=")) {
+      secondaryDns.fromString(line.substring(10));
+    } else if (line.startsWith("auto=")) {
+      autoBenchEnabled = (line.substring(5) == "1");
     }
   }
   f.close();
+  if (loadedPool && numDnsServers > 0 && primaryDns == IPAddress(1,1,1,1)) {
+      primaryDns = dnsPool[0];
+      if (numDnsServers > 1) secondaryDns = dnsPool[1];
+      else secondaryDns = dnsPool[0];
+  }
 }
 static void saveDnsCfg() {
   File f = LittleFS.open("/dns.cfg", "w");
-  if (!f)
-    return;
-  f.println("upstream=" + upstreamDNS.toString());
+  if (!f) return;
+  f.print("pool=");
+  for (int i = 0; i < numDnsServers; i++) {
+    f.print(dnsPool[i].toString());
+    if (i < numDnsServers - 1) f.print(",");
+  }
+  f.println();
   f.println("timeout=" + String(dnsTimeoutMs));
+  f.println("primary=" + primaryDns.toString());
+  f.println("secondary=" + secondaryDns.toString());
+  f.println("auto=" + String(autoBenchEnabled ? 1 : 0));
   f.close();
 }
 static void loadLangCfg() {
@@ -741,7 +780,8 @@ static void forwardUpstreamAsync(int qlen, IPAddress cip, uint16_t cport,
   buf[0] = uTid >> 8;
   buf[1] = uTid & 0xFF;
 
-  upstreamCli.beginPacket(upstreamDNS, 53);
+  IPAddress targetDns = (dnsFailCount >= 3) ? secondaryDns : primaryDns;
+  upstreamCli.beginPacket(targetDns, 53);
   upstreamCli.write(buf, qlen);
   sendUdpPacket(upstreamCli);
   Serial.printf("[DNS] -> Forwarded dhash %llu (type %d) to upstream (uTid: %d, slot: %d, q_depth: %d/%d)\n", dhash, qtype, uTid, slot, active_count + 1, MAX_PENDING);
@@ -963,6 +1003,20 @@ button:hover{background:#2ea043}
 .sg{color:#3fb950}.lk{color:#8b949e;font-size:11px}
 #st{display:block;margin-top:10px;color:#3fb950;font-size:13px;min-height:20px}
 label{color:#8b949e;font-size:12px}
+.modal{display:none;position:fixed;z-index:99;left:0;top:0;width:100%;height:100%;background:rgba(0,0,0,0.7);backdrop-filter:blur(3px)}
+.modal-content{background:#161b22;margin:5% auto;padding:20px;border:1px solid #30363d;width:90%;max-width:800px;border-radius:8px;position:relative;max-height:85vh;overflow-y:auto}
+.close{color:#8b949e;position:absolute;top:10px;right:15px;font-size:24px;font-weight:bold;cursor:pointer}
+.close:hover{color:#fff}
+.table-wrap{overflow-x:auto;width:100%}
+.wrap{padding:16px;max-width:1000px;margin:auto;width:100%}
+@media(max-width:600px){
+table{border:0;width:100%}
+table thead{display:none}
+table tr{display:block;margin-bottom:12px;border:1px solid #30363d;border-radius:6px;background:#0d1117;box-shadow: 0 2px 4px rgba(0,0,0,0.2)}
+table td{display:flex;justify-content:flex-start;align-items:flex-start;text-align:left;border-bottom:1px solid #21262d;padding:10px;word-break:break-all}
+table td:last-child{border-bottom:0}
+table td::before{content:attr(data-label);font-weight:bold;color:#8b949e;min-width:100px;flex-shrink:0;}
+}
 </style></head><body>
 <header><h1 id=tt>🛡️ AdBlock Setup</h1><div>
 <button class=lb onclick="sL('uk')">🇺🇦</button>
@@ -978,6 +1032,8 @@ label{color:#8b949e;font-size:12px}
 <button onclick="go()" id=cb>Connect</button>
 <span id=st></span>
 </div><script>
+const dnsN={"8.8.8.8":"Google","8.8.4.4":"Google","1.1.1.1":"Cloudflare","1.0.0.1":"Cloudflare","9.9.9.9":"Quad9","149.112.112.112":"Quad9","208.67.222.222":"OpenDNS","208.67.220.220":"OpenDNS","94.140.14.14":"AdGuard","94.140.15.15":"AdGuard","77.88.8.8":"Yandex","77.88.8.1":"Yandex","185.228.168.9":"CleanBrowsing","185.228.169.9":"CleanBrowsing","76.76.2.0":"ControlD","76.76.10.0":"ControlD","45.90.28.190":"NextDNS","45.90.30.190":"NextDNS","8.26.56.26":"Comodo","8.20.247.20":"Comodo","9.9.9.11":"Quad9 (ECS)","1.1.1.2":"Cloudflare (Security)","1.1.1.3":"Cloudflare (Family)"};
+function dN(ip){return dnsN[ip]?ip+' ('+dnsN[ip]+')':ip;}
 const L={
 uk:{tt:'🛡️ Налаштування AdBlock',wh:'WiFi Мережі',hn:'Мережа',hs:'Сигнал',hc:'Захист',
 ch:'Підключення',sl:'SSID',pl:'Пароль',cb:'Підключити',sb:'↻ Сканувати',
@@ -991,7 +1047,7 @@ sc:'Scanning...',sv:'Saved! Rebooting...',op:'Open'}
 };
 let lang='en',nets=[];
 function t(k){return L[lang]&&L[lang][k]||L.en[k]||k}
-function tr(){['tt','wh','hn','hs','hc','ch','sl','pl','cb','sb'].forEach(k=>{let e=document.getElementById(k);if(e)e.textContent=t(k)});
+function tr(){['tt','wh','hn','hs','hc','ch','sl','pl','cb','sb'].forEach(k=>{let e=document.getElementById(k);if(e)e.textContent=t(k==='hLogM'?'hLog':k)});
 document.querySelectorAll('.lb').forEach((b,i)=>{b.classList.toggle('on',['uk','ru','en'][i]==lang)})}
 function sig(r){return r>-50?'▂▄▆█':r>-60?'▂▄▆░':r>-70?'▂▄░░':'▂░░░'}
 function show(){wt.innerHTML=nets.map(n=>`<tr onclick="ss.value='${n.s.replace(/'/g,"\\'")}';pw.focus()"><td>${n.s}</td><td><span class=sg>${sig(n.r)}</span> ${n.r}</td><td class=lk>${n.e?'🔒':t('op')}</td></tr>`).join('')||'<tr><td colspan=3 style=color:#8b949e>—</td></tr>'}
@@ -1009,7 +1065,7 @@ const char DASH_PAGE[] PROGMEM =
 <title>C3 AdBlock</title><style>
 *{box-sizing:border-box}body{font:14px system-ui,sans-serif;margin:0;background:#0d1117;color:#c9d1d9}
 header{background:#161b22;padding:14px 18px;border-bottom:1px solid #30363d;display:flex;justify-content:space-between;align-items:center}
-h1{margin:0;font-size:18px}h1 span{color:#3fb950}.wrap{padding:16px;max-width:1000px;margin:auto}
+h1{margin:0;font-size:18px}h1 span{color:#3fb950}
 .cards{display:flex;flex-wrap:wrap;gap:10px;margin-bottom:16px}
 .card{background:#161b22;border:1px solid #30363d;border-radius:8px;padding:12px 16px;flex:1;min-width:120px}
 .card .v{font-size:22px;font-weight:600}.card .l{color:#8b949e;font-size:12px}
@@ -1026,6 +1082,20 @@ h2{font-size:14px;color:#8b949e;margin:18px 0 8px}
 .rst{background:#da3633;color:#fff;border-color:#da3633}.rst:hover{background:#b62324}
 .bnc{color:#8b949e;font-size:12px;margin-top:6px;min-height:16px}
 .hlp{color:#8b949e;font-size:12px;margin-bottom:18px}
+.modal{display:none;position:fixed;z-index:99;left:0;top:0;width:100%;height:100%;background:rgba(0,0,0,0.7);backdrop-filter:blur(3px)}
+.modal-content{background:#161b22;margin:5% auto;padding:20px;border:1px solid #30363d;width:90%;max-width:800px;border-radius:8px;position:relative;max-height:85vh;overflow-y:auto}
+.close{color:#8b949e;position:absolute;top:10px;right:15px;font-size:24px;font-weight:bold;cursor:pointer}
+.close:hover{color:#fff}
+.table-wrap{overflow-x:auto;width:100%}
+.wrap{padding:16px;max-width:1000px;margin:auto;width:100%}
+@media(max-width:600px){
+table{border:0;width:100%}
+table thead{display:none}
+table tr{display:block;margin-bottom:12px;border:1px solid #30363d;border-radius:6px;background:#0d1117;box-shadow: 0 2px 4px rgba(0,0,0,0.2)}
+table td{display:flex;justify-content:flex-start;align-items:flex-start;text-align:left;border-bottom:1px solid #21262d;padding:10px;word-break:break-all}
+table td:last-child{border-bottom:0}
+table td::before{content:attr(data-label);font-weight:bold;color:#8b949e;min-width:100px;flex-shrink:0;}
+}
 </style></head><body>
 <header><h1>🛡️ C3 AdBlock <span id=host></span></h1><div>
 <button class=lb onclick="sL('uk')">🇺🇦</button>
@@ -1033,30 +1103,55 @@ h2{font-size:14px;color:#8b949e;margin:18px 0 8px}
 <button class=lb onclick="sL('en')">🇬🇧</button>
 </div></header><div class=wrap>
 <div class=cards id=sys></div>
-<h2 id=hCli></h2><table id=ct><thead><tr><th id=thCli></th><th>MAC</th><th id=thBlk></th><th id=thAlw></th><th></th></tr></thead><tbody></tbody></table>
-<div style="display:flex;gap:20px;flex-wrap:wrap"><div style="flex:1;min-width:300px">
+<h2 id=hCli></h2><div class="table-wrap"><table id=ct><thead><tr><th id=thCli></th><th>MAC</th><th id=thBlk></th><th id=thAlw></th><th></th></tr></thead><tbody></tbody></table></div>
+<div style="display:flex;gap:20px;flex-wrap:wrap"><div style="flex:1;min-width:250px;width:100%">
 <h2 id=hCust></h2>
 <div style=margin-bottom:8px><input id=dom placeholder="ads.example.com" size=30><button onclick=addDom() id=bBlk></button></div>
-<table id=cl><tbody></tbody></table>
-</div><div style="flex:1;min-width:300px">
+<div class="table-wrap"><table id=cl><tbody></tbody></table></div>
+</div><div style="flex:1;min-width:250px;width:100%">
 <h2 id=hAlw></h2>
 <div style=margin-bottom:8px><input id=adom placeholder="mail.example.com" size=30><button onclick=addAllow() id=bAlw></button></div>
-<table id=al><tbody></tbody></table>
+<div class="table-wrap"><table id=al><tbody></tbody></table></div>
 </div></div>
 
-<h2 id=hLog></h2>
-<table id=ql><tbody></tbody></table>
+<button onclick="document.getElementById('logModal').style.display='block'" class=sc style="margin-top:20px;margin-bottom:20px" id=hLog></button>
+<div id=logModal class=modal>
+  <div class=modal-content>
+    <span class=close onclick="document.getElementById('logModal').style.display='none'">&times;</span>
+    <h2 id=hLogM style="margin-top:0"></h2>
+    <div class=table-wrap><table id=ql><tbody></tbody></table></div>
+  </div>
+</div>
 
 <h2 id=hDns></h2>
-<div style=margin-bottom:6px>
-<select id=dsel><option value="9.9.9.9">Quad9 (9.9.9.9)</option><option value="1.1.1.1">Cloudflare (1.1.1.1)</option><option value="8.8.8.8">Google (8.8.8.8)</option><option value="208.67.222.222">OpenDNS (208.67.222.222)</option></select>
-<span id=tL style="color:#8b949e;font-size:12px;margin-left:8px"></span> <input id=dtout size=4 value=700> <span style="color:#8b949e;font-size:12px">ms</span>
-<button onclick=setDns() id=bDn></button> <button onclick=bench() id=bBe></button> <button onclick=benchAll() id=bBA></button></div>
-<div class=bnc id=bres></div>
+<div style="margin-bottom:14px;">
+  <div id=pool_list style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:10px;min-height:24px;align-items:center"></div>
+  <div style="display:flex;gap:10px;align-items:center;margin-bottom:15px">
+    <input id=new_dns placeholder="8.8.8.8" style="width:140px;margin:0">
+    <button onclick="addPool()" id=bAdd class=sc>+</button>
+  </div>
+  <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:15px">
+    <span id=tL style="color:#8b949e;font-size:12px;"></span>
+    <input id=dtout type=number style="width:70px;margin:0" placeholder="700">
+  </div>
+  <div style="display:flex;gap:15px;align-items:center;width:100%;margin-bottom:15px;flex-wrap:wrap">
+    <label style="display:flex;gap:5px;align-items:center;font-size:13px"><span id=lPrim>Primary:</span> <select id=dprim style="margin:0"></select></label>
+    <label style="display:flex;gap:5px;align-items:center;font-size:13px"><span id=lSec>Secondary:</span> <select id=dsec style="margin:0"></select></label>
+    <label style="display:flex;gap:5px;align-items:center;font-size:13px;margin-left:5px"><input type=checkbox id=cauto> <span id=lAuto>Auto-Benchmark (05:00)</span></label>
+  </div>
+  <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+    <button onclick="setDns(0)" id=bSave class=sc></button>
+    <button onclick="setDns(1)" id=bBench class=sc></button>
+    <button onclick="resetDns()" id=bResDns class=rst style="margin-left:auto"></button>
+  </div>
+</div>
+<div id=bres class=bnc></div>
 <h2 id=hRst></h2>
 <div class=hlp id=rstW></div>
 <button class=rst onclick="if(confirm(t('rstC')))fetch('/factory-reset').then(()=>{location.reload()})" id=bRs></button>
 </div><script>
+const dnsN={"8.8.8.8":"Google","8.8.4.4":"Google","1.1.1.1":"Cloudflare","1.0.0.1":"Cloudflare","9.9.9.9":"Quad9","149.112.112.112":"Quad9","208.67.222.222":"OpenDNS","208.67.220.220":"OpenDNS","94.140.14.14":"AdGuard","94.140.15.15":"AdGuard","77.88.8.8":"Yandex","77.88.8.1":"Yandex","185.228.168.9":"CleanBrowsing","185.228.169.9":"CleanBrowsing","76.76.2.0":"ControlD","76.76.10.0":"ControlD","45.90.28.190":"NextDNS","45.90.30.190":"NextDNS","8.26.56.26":"Comodo","8.20.247.20":"Comodo","9.9.9.11":"Quad9 (ECS)","1.1.1.2":"Cloudflare (Security)","1.1.1.3":"Cloudflare (Family)"};
+function dN(ip){return dnsN[ip]?ip+' ('+dnsN[ip]+')':ip;}
 const L={
 uk:{
 sB:'Заблоковано',sA:'Дозволено',sL:'Блоклист',sC:'Клієнти',sW:'WiFi',sT:'Темп',sR:'Вільна RAM',sU:'Аптайм',
@@ -1072,7 +1167,7 @@ hFw:'ПРОШИВКА — OTA',bFl:'Прошити',fwH:'завантажте fi
 hDns:'НАЛАШТУВАННЯ DNS',bDn:'Змінити',bBe:'Тест',bBA:'Тест всіх',
 hRst:'СКИДАННЯ',bRs:'Скинути налаштування',rstW:'WiFi та DNS будуть видалені. Пристрій перезавантажиться.',
 rstC:'Скинути всі налаштування?',
-fl:'прошивка',ul:'завантаження',rb:'✓ перезавантаження ~15с',uf:'✗ помилка',tst:'тестування...',dom:'доменів',tL:'Таймаут'
+fl:'прошивка',ul:'завантаження',rb:'✓ перезавантаження ~15с',uf:'✗ помилка',tst:'тестування...',dom:'доменів',tL:'Таймаут', lbPrim:'Основний:', lbSec:'Запасний:', lbAuto:'Авто-тест (05:00)', rstDnsQ:'Скинути налаштування DNS до стандартних?', svg:'Збереження...', svd:'Збережено'
 },
 ru:{
 sB:'Заблокировано',sA:'Разрешено',sL:'Блоклист',sC:'Клиенты',sW:'WiFi',sT:'Темп',sR:'Свободная RAM',sU:'Аптайм',
@@ -1088,7 +1183,7 @@ hFw:'ПРОШИВКА — OTA',bFl:'Прошить',fwH:'загрузите firm
 hDns:'НАСТРОЙКИ DNS',bDn:'Сменить',bBe:'Тест',bBA:'Тест всех',
 hRst:'СБРОС',bRs:'Сбросить настройки',rstW:'WiFi и DNS будут удалены. Устройство перезагрузится.',
 rstC:'Сбросить все настройки?',
-fl:'прошивка',ul:'загрузка',rb:'✓ перезагрузка ~15с',uf:'✗ ошибка',tst:'тестирование...',dom:'доменов',tL:'Таймаут'
+fl:'прошивка',ul:'загрузка',rb:'✓ перезагрузка ~15с',uf:'✗ ошибка',tst:'тестирование...',dom:'доменов',tL:'Таймаут', lbPrim:'Основной:', lbSec:'Запасной:', lbAuto:'Авто-тест (05:00)', rstDnsQ:'Сбросить настройки DNS к стандартным?', svg:'Сохранение...', svd:'Сохранено'
 },
 en:{
 sB:'Total blocked',sA:'Total allowed',sL:'Blocklist',sC:'Clients',sW:'WiFi',sT:'Temp',sR:'Free RAM',sU:'Uptime',
@@ -1096,7 +1191,7 @@ hCli:'CLIENTS',thCli:'Client',thBlk:'Blocked',thAlw:'Allowed',banned:'BANNED',ba
 hCust:'CUSTOM BLOCKED DOMAINS',bBlk:'Block domain',noCust:'none yet',
 hAlw:'CUSTOM ALLOWED DOMAINS',bAlw:'Allow domain',noAlw:'none yet',
 hLog:'QUERY LOG (LAST 50)',
-stAlw:'Allowed',stBlk:'Blocked',stWht:'Whitelisted',stCch:'Cache',addB:'+ Block',addW:'+ Allow',
+stAlw:'Allowed',stBlk:'Blocked',stWht:'Whitelisted',stCch:'Cache',addB:'+ Block',addW:'+ Allow',svDns:'Save & Test',
 hUp:'BLOCKLIST — UPLOAD',bUp:'Upload',upH:'build blocklist.bin with tools/build_blocklist.py, then upload here — no USB',
 hRem:'BLOCKLIST — REMOTE AUTO-UPDATE',bSv:'Save',bFn:'Fetch now',
 remH:'device pulls blocklist.bin on a schedule. last:',evL:'every',hL:'h',
@@ -1104,45 +1199,96 @@ hFw:'FIRMWARE — OTA UPDATE',bFl:'Flash firmware',fwH:'upload firmware.bin — 
 hDns:'DNS SETTINGS',bDn:'Change',bBe:'Benchmark',bBA:'Bench all',
 hRst:'FACTORY RESET',bRs:'Reset settings',rstW:'WiFi and DNS settings will be deleted. Device will reboot.',
 rstC:'Reset all settings?',
-fl:'flashing',ul:'uploading',rb:'✓ rebooting ~15s',uf:'✗ failed',tst:'testing...',dom:'domains',tL:'Timeout'
+fl:'flashing',ul:'uploading',rb:'✓ rebooting ~15s',uf:'✗ failed',tst:'testing...',dom:'domains',tL:'Timeout', lbPrim:'Primary:', lbSec:'Secondary:', lbAuto:'Auto-Benchmark (05:00)', rstDnsQ:'Reset DNS settings to defaults?', svg:'Saving...', svd:'Saved'
 }};
 let lang='en';
 function t(k){return L[lang]&&L[lang][k]||L.en[k]||k}
 function fmt(n){return n.toLocaleString()}
-function tr(){['hCli','thCli','thBlk','thAlw','hCust','bBlk','hAlw','bAlw','hLog','hDns','bDn','bBe','bBA','hRst','bRs'].forEach(k=>{
-let e=document.getElementById(k);if(e)e.textContent=t(k)});
-['rstW','tL'].forEach(k=>{let e=document.getElementById(k);if(e)e.textContent=t(k)});
+function tr(){['hCli','thCli','thBlk','thAlw','hCust','bBlk','hAlw','bAlw','hLog','hLogM','hDns','bDn','bBe','bBA','hRst','bRs'].forEach(k=>{
+let e=document.getElementById(k);if(e)e.textContent=t(k==='hLogM'?'hLog':k)});
+['rstW','tL'].forEach(k=>{let e=document.getElementById(k);if(e)e.textContent=t(k==='hLogM'?'hLog':k)});
 document.querySelectorAll('.lb').forEach((b,i)=>{b.classList.toggle('on',['uk','ru','en'][i]==lang)})}
+window.onclick=function(e){let m=document.getElementById("logModal");if(e.target==m)m.style.display="none"};
 async function load(){let s=await(await fetch('/stats.json')).json();
 if(s.lang){lang=s.lang;tr()}
 host.textContent='@ '+s.ip;
 sys.innerHTML=[[t('sB'),fmt(s.blocked),'b'],[t('sA'),fmt(s.allowed),'a'],[t('sL'),fmt(s.domains)+' '+t('dom'),''],[t('sC'),s.clients.length,''],[t('sW'),s.rssi+' dBm',''],[t('sT'),s.temp+' °C',''],[t('sR'),Math.round(s.heap/1024)+' KB',''],[t('sU'),s.uptime,'']]
 .map(c=>`<div class=card><div class="v ${c[2]}">${c[1]}</div><div class=l>${c[0]}</div></div>`).join('');
 ct.tBodies[0].innerHTML=s.clients.sort((a,b)=>(b.blocked+b.allowed)-(a.blocked+a.allowed)).map(c=>
-`<tr><td>${c.ip}${c.banned?' <span class=tag style=color:#f85149>'+t('banned')+'</span>':''}</td><td>${c.mac}</td>
-<td class=b>${fmt(c.blocked)}</td><td class=a>${fmt(c.allowed)}</td>
-<td><button class=ban onclick="fetch('/ban?ip=${c.ip}').then(load)">${c.banned?t('unban'):t('ban')}</button></td></tr>`).join('');
+`<tr><td data-label="IP">${c.ip}${c.banned?' <span class=tag style=color:#f85149>'+t('banned')+'</span>':''}</td><td data-label="MAC">${c.mac}</td>
+<td data-label="${t('thBlk')}" class=b>${fmt(c.blocked)}</td><td data-label="${t('thAlw')}" class=a>${fmt(c.allowed)}</td>
+<td data-label=""><button class=ban onclick="fetch('/ban?ip=${c.ip}').then(load)">${c.banned?t('unban'):t('ban')}</button></td></tr>`).join('');
 cl.tBodies[0].innerHTML=s.custom.map(d=>`<tr><td>${d}</td><td style=text-align:right><button onclick="fetch('/unblock?d='+encodeURIComponent('${d}')).then(load)">✕</button></td></tr>`).join('')||'<tr><td style=color:#8b949e>'+t('noCust')+'</td></tr>';
 al.tBodies[0].innerHTML=s.allow.map(d=>`<tr><td>${d}</td><td style=text-align:right><button onclick="fetch('/unallow?d='+encodeURIComponent('${d}')).then(load)">✕</button></td></tr>`).join('')||'<tr><td style=color:#8b949e>'+t('noAlw')+'</td></tr>';
 
+
+if(typeof window.curPool === 'undefined') window.curPool = [];
+function renderPool() {
+  let list = document.getElementById('pool_list');
+  if(!list) return;
+  list.innerHTML = window.curPool.map(ip => '<span class="tag" style="padding:4px 8px;font-size:12px;background:#238636">'+dN(ip)+' <span style="cursor:pointer;color:#ff7b72;margin-left:4px" onclick="remPool(\''+ip+'\')">✕</span></span>').join('');
+  let opts = window.curPool.map(ip => '<option value="'+ip+'">'+dN(ip)+'</option>').join('');
+  let pr = typeof dprim !== 'undefined' ? dprim.value : '';
+  let se = typeof dsec !== 'undefined' ? dsec.value : '';
+  if(typeof dprim !== 'undefined') dprim.innerHTML = opts;
+  if(typeof dsec !== 'undefined') dsec.innerHTML = opts;
+  if (window.curPool.includes(pr)) dprim.value = pr;
+  if (window.curPool.includes(se)) dsec.value = se;
+}
+window.addPool = function(){
+  let nd = document.getElementById('new_dns');
+  let v = nd.value.trim();
+  if(v && !window.curPool.includes(v)) { window.curPool.push(v); renderPool(); nd.value=''; }
+};
+window.remPool = function(ip){
+  window.curPool = window.curPool.filter(x => x !== ip);
+  renderPool();
+};
+window.resetDns = function(){
+  if(confirm(t('rstDnsQ'))) {
+    window.curPool = ['9.9.9.9','1.1.1.1','8.8.8.8','208.67.222.222'];
+    if(typeof dprim !== 'undefined') dprim.innerHTML = window.curPool.map(ip => '<option value="'+ip+'">'+dN(ip)+'</option>').join('');
+    if(typeof dsec !== 'undefined') dsec.innerHTML = window.curPool.map(ip => '<option value="'+ip+'">'+dN(ip)+'</option>').join('');
+    dprim.value = '9.9.9.9';
+    dsec.value = '1.1.1.1';
+    cauto.checked = true;
+    renderPool();
+    setDns(0);
+  }
+};
+
 if(document.activeElement!=dtout)dtout.value=s.dnstout||700;
-if(s.dns){let f=false;for(let o of dsel.options)if(o.value==s.dns){f=true;break}
-if(!f){let o=new Option('Custom ('+s.dns+')',s.dns);dsel.prepend(o)}
-dsel.value=s.dns}}
+
+
+let p = s.pool.split(',').filter(x=>x.trim());
+if (window.lastServerPool !== p.join(',')) {
+    window.lastServerPool = p.join(',');
+    if(typeof cauto !== 'undefined') cauto.checked = (s.auto==1);
+    window.curPool = p;
+    renderPool();
+    if(typeof dprim !== 'undefined') dprim.value = s.primary;
+    if(typeof dsec !== 'undefined') dsec.value = s.secondary;
+}
+
+let lP=document.getElementById('lPrim'); if(lP)lP.textContent=t('lbPrim');
+let lS=document.getElementById('lSec'); if(lS)lS.textContent=t('lbSec');
+let lA=document.getElementById('lAuto'); if(lA)lA.textContent=t('lbAuto');
+let bs=document.getElementById('bSave'); if(bs)bs.textContent=t('bSv') || 'Save';
+let bb=document.getElementById('bBench'); if(bb)bb.textContent=t('bBe') || 'Auto Benchmark';
+let ba=document.getElementById('bAdd'); if(ba)ba.textContent='+';
+let br=document.getElementById('bResDns'); if(br)br.textContent=t('bRs') || 'Reset Defaults';}
 function addDom(){let d=dom.value.trim();if(d){fetch('/addblock?d='+encodeURIComponent(d)).then(()=>{dom.value='';load()})}}
 function addAllow(){let d=adom.value.trim();if(d){fetch('/addallow?d='+encodeURIComponent(d)).then(()=>{adom.value='';load()})}}
 function aBlk(d){fetch('/addblock?d='+encodeURIComponent(d)).then(()=>{load();updL()})}
 function aWht(d){fetch('/addallow?d='+encodeURIComponent(d)).then(()=>{load();updL()})}
 
 function sL(l){fetch('/setlang?l='+l).then(()=>{lang=l;tr();load();updL()})}
-function setDns(){fetch('/setdns?ip='+dsel.value+'&timeout='+(parseInt(dtout.value)||700)).then(load)}
-function bench(){bres.textContent=t('tst');fetch('/benchmark?ip='+dsel.value).then(r=>r.json()).then(d=>{bres.textContent=dsel.value+': min='+d.min+'ms avg='+d.avg+'ms max='+d.max+'ms'}).catch(()=>{bres.textContent='error'})}
-function benchAll(){bres.textContent=t('tst');fetch('/benchmarkall').then(r=>r.json()).then(d=>{bres.innerHTML=Object.entries(d).map(([k,v])=>k+': min='+v.min+'ms avg='+v.avg+'ms max='+v.max+'ms').join('<br>')}).catch(()=>{bres.textContent='error'})}
+function setDns(bench){bres.textContent=bench?t('tst'):t('svg');fetch('/setdns?pool='+window.curPool.join(',')+'&timeout='+(parseInt(dtout.value)||700)+'&primary='+dprim.value+'&secondary='+dsec.value+'&auto='+(cauto.checked?1:0)+'&bench='+bench).then(r=>bench?r.json():r.text()).then(d=>{if(bench){if(typeof dprim!=='undefined')dprim.value=d.primary;if(typeof dsec!=='undefined')dsec.value=d.secondary;let txt='<div style=\"margin-top:8px;line-height:1.5\"><b>Best:</b> '+dN(d.primary)+', '+dN(d.secondary)+'<br>';if(d.results)txt+=d.results.sort((a,b)=>a.ms-b.ms).map(x=>dN(x.ip)+' <span style=\"color:#8b949e\">('+x.ms+'ms)</span>').join('<br>');txt+='</div>';bres.innerHTML=txt;}else{bres.textContent=t('svd')||'Saved';setTimeout(()=>{if(bres.textContent===(t('svd')||'Saved'))bres.textContent='';},2500);}load();}).catch(()=>{bres.textContent='error'})}
 
 async function updL(){try{
 let d=await(await fetch('/logs.json')).json();
 let st=[['#8b949e',t('stAlw')],['#f85149',t('stBlk')],['#3fb950',t('stWht')],['#8b949e',t('stCch')]];
-ql.tBodies[0].innerHTML=d.map(r=>`<tr><td style=color:#8b949e;width:40px>${r.ago}s</td><td style=color:#c9d1d9>${r.dom}</td><td style=color:#8b949e;font-size:11px>${r.ip}</td><td style="color:${st[r.st][0]}">${st[r.st][1]}</td><td style="text-align:right"><button style=margin-right:4px onclick="aBlk('${r.dom}')">${t('addB')}</button><button onclick="aWht('${r.dom}')">${t('addW')}</button></td></tr>`).join('');
+ql.tBodies[0].innerHTML=d.map(r=>`<tr><td data-label="Time" style="color:#8b949e;white-space:nowrap">${r.ago}s</td><td data-label="Domain" style="color:#c9d1d9;word-break:break-all">${r.dom}</td><td data-label="Client" style="color:#8b949e;font-size:11px">${r.ip}</td><td data-label="Status" style="color:${st[r.st][0]}">${st[r.st][1]}</td><td data-label=""><button style=margin-right:4px onclick="aBlk('${r.dom}')">${t('addB')}</button><button onclick="aWht('${r.dom}')">${t('addW')}</button></td></tr>`).join('');
 }catch(e){}}
 
 load();setInterval(load,3000);
@@ -1163,8 +1309,8 @@ static void handleStats() {
              ",\"domains\":" + numHashes + ",\"rssi\":" + WiFi.RSSI() +
              ",\"temp\":" + String(temperatureRead(), 1) +
              ",\"heap\":" + ESP.getFreeHeap() + ",\"uptime\":\"" + ut + "\"" +
-             ",\"lang\":\"" + currentLang + "\"" + ",\"dns\":\"" +
-             upstreamDNS.toString() + "\"" +
+             ",\"lang\":\"" + currentLang + "\"" +
+             ",\"dns\":\"" + primaryDns.toString() + "," + secondaryDns.toString() + "\",\"primary\":\"" + primaryDns.toString() + "\",\"secondary\":\"" + secondaryDns.toString() + "\",\"auto\":" + String(autoBenchEnabled ? 1 : 0) + ",\"pool\":\"" + [](){String p="";for(int i=0;i<numDnsServers;i++){p+=dnsPool[i].toString();if(i<numDnsServers-1)p+=",";}return p;}() + "\"" +
              ",\"dnstout\":" + String(dnsTimeoutMs) + ",\"upurl\":\"" +
              jesc(updateUrl) + "\",\"upiv\":" + updateIntervalH +
              ",\"upstat\":\"" + jesc(updateStatus) +
@@ -1256,19 +1402,50 @@ static void handleSaveWifi() {
   ESP.restart();
 }
 static void handleSetDns() {
-  if (web.hasArg("ip")) {
-    IPAddress dns;
-    if (dns.fromString(web.arg("ip"))) {
-      upstreamDNS = dns;
+    if (web.hasArg("pool")) {
+      String ips = web.arg("pool");
+      numDnsServers = 0;
+      int start = 0;
+      while (start < ips.length() && numDnsServers < MAX_DNS_SERVERS) {
+        int idx = ips.indexOf(',', start);
+        if (idx == -1) idx = ips.length();
+        IPAddress ip;
+        if (ip.fromString(ips.substring(start, idx))) {
+          dnsPool[numDnsServers++] = ip;
+        }
+        start = idx + 1;
+      }
+      if (web.hasArg("timeout")) {
+          uint32_t t = web.arg("timeout").toInt();
+          if (t >= 50 && t <= 5000) dnsTimeoutMs = t;
+      }
+      if (web.hasArg("auto")) {
+          autoBenchEnabled = (web.arg("auto") == "1");
+      }
+      if (web.hasArg("bench") && web.arg("bench") == "1") {
+          String benchRes = autoBenchmarkDns();
+          saveDnsCfg();
+          String j = "{\"primary\":\"" + primaryDns.toString() + "\",\"secondary\":\"" + secondaryDns.toString() + "\",\"results\":" + benchRes + "}";
+          web.send(200, "application/json", j);
+          return;
+      } else {
+          if (web.hasArg("primary")) {
+              primaryDns.fromString(web.arg("primary"));
+          }
+          if (web.hasArg("secondary")) {
+              secondaryDns.fromString(web.arg("secondary"));
+          }
+      }
+      saveDnsCfg();
+      web.send(200, "text/plain", "ok");
+      return;
     }
-  }
-  if (web.hasArg("timeout")) {
-    uint32_t t = web.arg("timeout").toInt();
-    if (t >= 50 && t <= 5000)
-      dnsTimeoutMs = t;
-  }
-  saveDnsCfg();
-  web.send(200, "text/plain", "ok");
+    web.send(400, "text/plain", "bad params");
+}
+static void handleBenchmark() {
+    String benchRes = autoBenchmarkDns();
+    String j = "{\"primary\":\"" + primaryDns.toString() + "\",\"secondary\":\"" + secondaryDns.toString() + "\",\"results\":" + benchRes + "}";
+    web.send(200, "application/json", j);
 }
 static void handleFactoryReset() {
   LittleFS.remove("/wifi.cfg");
@@ -1324,34 +1501,7 @@ static void doBenchmark(IPAddress dns, int count, uint32_t &outMin,
   outAvg = count > 0 ? sumT / count : 0;
   outMax = maxT;
 }
-static void handleBenchmark() {
-  IPAddress dns;
-  if (!dns.fromString(web.arg("ip"))) {
-    web.send(400, "text/plain", "bad ip");
-    return;
-  }
-  uint32_t mn, avg, mx;
-  doBenchmark(dns, 15, mn, avg, mx);
-  web.send(200, "application/json",
-           "{\"min\":" + String(mn) + ",\"avg\":" + String(avg) +
-               ",\"max\":" + String(mx) + "}");
-}
-static void handleBenchmarkAll() {
-  const char *names[] = {"Quad9", "Cloudflare", "Google", "OpenDNS"};
-  IPAddress ips[4] = {IPAddress(9, 9, 9, 9), IPAddress(1, 1, 1, 1),
-                      IPAddress(8, 8, 8, 8), IPAddress(208, 67, 222, 222)};
-  String j = "{";
-  for (int s = 0; s < 4; s++) {
-    uint32_t mn, avg, mx;
-    doBenchmark(ips[s], 5, mn, avg, mx);
-    if (s)
-      j += ",";
-    j += "\"" + String(names[s]) + "\":{\"min\":" + String(mn) +
-         ",\"avg\":" + String(avg) + ",\"max\":" + String(mx) + "}";
-  }
-  j += "}";
-  web.send(200, "application/json", j);
-}
+
 
 // ========== blocklist swap ==========
 static void reopenBlocklist() {
@@ -1583,8 +1733,7 @@ static void startMainServices() {
 
   // FORCE LwIP to use our upstream DNS to prevent Sinkhole Deadlock
   ip_addr_t dnsserver;
-  IP_ADDR4(&dnsserver, upstreamDNS[0], upstreamDNS[1], upstreamDNS[2],
-           upstreamDNS[3]);
+  IP_ADDR4(&dnsserver, primaryDns[0], primaryDns[1], primaryDns[2], primaryDns[3]);
   dns_setserver(0, &dnsserver);
 
   dnsServer.begin(DNS_PORT);
@@ -1671,7 +1820,7 @@ static void startMainServices() {
   web.on("/setlang", handleSetLang);
   web.on("/setdns", handleSetDns);
   web.on("/benchmark", handleBenchmark);
-  web.on("/benchmarkall", handleBenchmarkAll);
+
   web.on("/factory-reset", handleFactoryReset);
   web.begin();
 
@@ -1762,7 +1911,15 @@ void sysTask(void *pvParameters) {
           lastUpdateDay != timeinfo.tm_yday) {
         lastUpdateDay = timeinfo.tm_yday;
         shouldUpdate = true;
-      } else if (last_list_ts > 0 && (uint32_t)nowTime > last_list_ts &&
+      }
+      
+      static int lastDnsBenchDay = -1;
+      if (timeinfo.tm_hour == 5 && timeinfo.tm_min == 0 &&
+          lastDnsBenchDay != timeinfo.tm_yday) {
+        lastDnsBenchDay = timeinfo.tm_yday;
+        if (autoBenchEnabled) autoBenchmarkDns();
+      }
+      if (last_list_ts > 0 && (uint32_t)nowTime > last_list_ts &&
                  ((uint32_t)nowTime - last_list_ts) >=
                      (updateIntervalH * 3600)) {
         // Если интервал задан в UI и это время истекло
@@ -1883,6 +2040,45 @@ void sysTask(void *pvParameters) {
   }
 }
 
+static String autoBenchmarkDns() {
+  if (numDnsServers == 0) return "[]";
+  if (numDnsServers == 1) {
+    primaryDns = dnsPool[0];
+    secondaryDns = dnsPool[0];
+    return "[{\"ip\":\"" + dnsPool[0].toString() + "\",\"ms\":0}]";
+  }
+  uint32_t avgs[MAX_DNS_SERVERS];
+  String res = "[";
+  for (int i = 0; i < numDnsServers; i++) {
+    uint32_t mn, avg, mx;
+    doBenchmark(dnsPool[i], 12, mn, avg, mx);
+    avgs[i] = avg;
+    res += "{\"ip\":\"" + dnsPool[i].toString() + "\",\"ms\":" + String(avg) + "}";
+    if (i < numDnsServers - 1) res += ",";
+  }
+  res += "]";
+  int best1 = -1, best2 = -1;
+  uint32_t min1 = 999999, min2 = 999999;
+  for (int i = 0; i < numDnsServers; i++) {
+    if (avgs[i] < min1) {
+      min2 = min1;
+      best2 = best1;
+      min1 = avgs[i];
+      best1 = i;
+    } else if (avgs[i] < min2) {
+      min2 = avgs[i];
+      best2 = i;
+    }
+  }
+  if (best1 != -1) primaryDns = dnsPool[best1];
+  if (best2 != -1) secondaryDns = dnsPool[best2];
+  else secondaryDns = primaryDns;
+  dnsFailCount = 0;
+  Serial.printf("[DNS] Auto-Benchmark finished. Primary: %s (%u ms), Secondary: %s (%u ms)\n",
+                primaryDns.toString().c_str(), min1,
+                secondaryDns.toString().c_str(), min2);
+  return res;
+}
 void setup() {
   Serial.begin(115200);
   pinMode(LED_PIN, OUTPUT);
